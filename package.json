@@ -1,0 +1,14 @@
+{
+  "name": "achievement-manager",
+  "version": "1.10.0",
+  "scripts": {
+    "dev": "./node_modules/.bin/starlight watch",
+    "build": "./node_modules/.bin/starlight pack",
+    "prepare": "./node_modules/.bin/starlight lsp"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.1",
+    "@types/react-dom": "19.1.1",
+    "@steambrew/starlight": "^1.1.3"
+  }
+}

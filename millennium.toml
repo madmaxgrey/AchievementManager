@@ -1,0 +1,24 @@
+[plugin]
+id = "achievement-manager"
+name = "Achievement Manager"
+version = "1.10"
+author = "madmaxgrey"
+description = "An Achievement Manager tab in the library's achievements window: unlock or lock achievements on your Steam account, using Steam's own controls."
+
+[assets]
+# the C# helper is bundled as a resource; the backend writes it out and compiles it on first use
+resources = ["resources/**/*"]
+
+[backend]
+entry = "backend/main.lua"
+sources = ["backend/**/*.lua"]
+
+[frontend]
+entry = "frontend/index.tsx"
+
+[compiler]
+output_path = "auto"
+
+[dev]
+auto_restart = true
+reload_steamui_when = "both"
