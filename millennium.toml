@@ -1,7 +1,7 @@
 [plugin]
 id = "achievement-manager"
 name = "Achievement Manager"
-version = "1.11"
+version = "1.11.1"
 author = "madmaxgrey"
 description = "An Achievement Manager tab in the library's achievements window: unlock or lock achievements on your Steam account, using Steam's own controls."
 

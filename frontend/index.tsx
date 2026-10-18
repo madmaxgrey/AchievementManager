@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.11 — Starlight build. Steam's beta removed the tabs of the achievements window, so
+/* Achievement Manager 1.11.1 — Starlight build. Steam's beta removed the tabs of the achievements window, so
  * the manager now opens from a button next to "View My Achievements" in its own Steam-styled window. */
 import { definePlugin, Field } from 'millennium';
 
@@ -175,7 +175,7 @@ function iconUrl(appId, icon) {
   return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
 }
 
-/* Achievement Manager — frontend (1.11).
+/* Achievement Manager — frontend (1.11.1).
  *
  * Steam's beta removed the tabs of the achievements window, so the manager now opens from its own button,
  * placed next to "View My Achievements" on a game's library page, and shows a window built to look like
@@ -846,6 +846,7 @@ function dispose() {
 const CLASS_DOCS = [
   {
     "group": "Window",
+    "blurb": "The popup itself and its background",
     "items": [
       {
         "selector": ".amw-root",
@@ -863,6 +864,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Navigation column",
+    "blurb": "The left column: game name and the filter entries",
     "items": [
       {
         "selector": ".amw-side",
@@ -900,6 +902,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Content panel",
+    "blurb": "Title, progress bar, search, sort and the list",
     "items": [
       {
         "selector": ".amw-main",
@@ -949,6 +952,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Achievement rows",
+    "blurb": "One card per achievement, with state classes",
     "items": [
       {
         "selector": ".amw-row",
@@ -990,6 +994,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Footer",
+    "blurb": "The status line and the action buttons",
     "items": [
       {
         "selector": ".amw-foot",
@@ -1007,6 +1012,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Loading and error screens",
+    "blurb": "What shows while loading or when something fails",
     "items": [
       {
         "selector": ".amw-center",
@@ -1020,6 +1026,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Button on the game page",
+    "blurb": "The button next to View My Achievements",
     "items": [
       {
         "selector": "[data-achievement-manager]",
@@ -1041,6 +1048,7 @@ const CLASS_DOCS = [
   },
   {
     "group": "Variables set on .amw-root",
+    "blurb": "Custom properties a theme can override",
     "items": [
       {
         "selector": "--amw-title",
@@ -1092,10 +1100,51 @@ function copyText(text, doc) {
   return first.catch(() => viaCommand());
 }
 
-function SettingsPanel() {
+const SETTINGS_CSS = `
+.amd-wrap{box-sizing:border-box;max-width:100%;overflow-x:hidden}
+.amd-wrap .amd-sections{margin-top:18px;padding-top:2px}
+.amd-wrap .amd-section{margin:0 0 10px;border:1px solid color-mix(in srgb, currentColor 14%, transparent);border-radius:6px;overflow:hidden;background:color-mix(in srgb, #fff 3%, transparent)}
+.amd-wrap .amd-head{display:flex;align-items:center;gap:12px;margin:0;padding:12px 14px;cursor:pointer;user-select:none;transition:background .15s ease}
+.amd-wrap .amd-head:hover{background:color-mix(in srgb, #fff 6%, transparent)}
+.amd-wrap .amd-chev{flex:none;display:flex;transition:transform .2s ease}
+.amd-wrap .amd-chev.amd-open{transform:rotate(90deg)}
+.amd-wrap .amd-titles{flex:1 1 auto;min-width:0}
+.amd-wrap .amd-name{font-size:15px;font-weight:600;line-height:20px}
+.amd-wrap .amd-blurb{margin-top:1px;font-size:12px;font-weight:400;line-height:16px;color:rgba(255,255,255,.58)}
+.amd-wrap .amd-pill{flex:none;font-size:11px;font-weight:600;line-height:16px;padding:1px 9px;border-radius:999px;background:color-mix(in srgb, currentColor 16%, transparent)}
+.amd-wrap .amd-collapse{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s ease}
+.amd-wrap .amd-collapse.amd-open{grid-template-rows:1fr}
+.amd-wrap .amd-inner{overflow:hidden;min-height:0}
+.amd-wrap .amd-item{display:flex;align-items:flex-start;gap:12px;padding:10px 14px;border-top:1px solid color-mix(in srgb, currentColor 10%, transparent)}
+.amd-wrap .amd-text{flex:1 1 auto;min-width:0}
+.amd-wrap .amd-sel{display:inline-block;max-width:100%;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, currentColor 14%, transparent);color:#fff;font-family:Consolas,"Courier New",monospace;font-size:12.5px;line-height:18px;cursor:pointer;word-break:break-all}
+.amd-wrap .amd-desc{margin-top:6px;font-size:12.5px;font-weight:400;line-height:1.45;color:rgba(255,255,255,.66)}
+.amd-wrap .amd-copy{flex:none;align-self:center;padding:3px 10px;border-radius:4px;border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.75);font-size:11px;line-height:16px;cursor:pointer;user-select:none;transition:background .15s ease,color .15s ease}
+.amd-wrap .amd-copy:hover{background:rgba(255,255,255,.12);color:#fff}
+.amd-wrap.amd-narrow .amd-item{flex-direction:column;gap:8px}
+.amd-wrap.amd-narrow .amd-copy{align-self:flex-start}
+.amd-wrap.amd-narrow .amd-head{padding:10px 12px}
+.amd-wrap.amd-narrow .amd-item{padding:10px 12px}
+`;
+
+function SettingsPanel(props) {
   const [copied, setCopied] = React.useState('');
+  // The settings pane can be narrow (a small window, no theme). Below ~560px the buttons go under the text and the rows stack.
+  const wrapRef = React.useRef(null);
+  const [narrow, setNarrow] = React.useState(!!(props && props.forceNarrow));
+  React.useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || !el.ownerDocument || !el.ownerDocument.defaultView) return undefined;
+    const view = el.ownerDocument.defaultView;
+    const measure = () => setNarrow(el.clientWidth > 0 && el.clientWidth < 560);
+    measure();
+    if (!view.ResizeObserver) return undefined;
+    const watcher = new view.ResizeObserver(measure);
+    watcher.observe(el);
+    return () => watcher.disconnect();
+  }, []);
   const [open, setOpen] = React.useState({});          // group name -> expanded; every section starts collapsed
-  const [manual, setManual] = React.useState('');   // text to copy by hand when the clipboard refuses
+  const [manual, setManual] = React.useState('');      // text to copy by hand when the clipboard refuses
   const copy = (text, what, event) => {
     let doc;
     try { doc = event && event.currentTarget && event.currentTarget.ownerDocument; } catch (e) { doc = undefined; }
@@ -1104,40 +1153,46 @@ function SettingsPanel() {
   };
   const toggle = name => setOpen(prev => ({ ...prev, [name]: !prev[name] }));
   const setAll = value => setOpen(() => Object.fromEntries(CLASS_DOCS.map(g => [g.group, value])));
-  const mono = { fontFamily: 'Consolas, "Courier New", monospace', fontSize: 12.5, cursor: 'pointer', wordBreak: 'break-all' };
   const Btn = API.DialogButton || API.Button;
+  const small = { flex: 'none', width: 'auto', whiteSpace: 'nowrap', padding: '0 14px' };
+  const layout = narrow ? 'below' : 'inline';
 
   const top = [
     h(API.Field, { key: 'intro', label: 'Theming Achievement Manager',
       description: 'The window is built from the same parts as Steam\'s game Properties window, so a theme that styles that window styles this one too. To refine it, use the class names below. Click a selector to copy it.' }, null),
-    h(API.Field, { key: 'copyall', label: 'CSS skeleton', description: 'Every selector below with an empty rule and a comment, ready to paste into your theme.' },
-      h(Btn, { onClick: e => copy(cssSkeleton(), 'CSS skeleton copied', e), style: { flex: 'none', width: 'auto', whiteSpace: 'nowrap', padding: '0 14px' } }, 'Copy CSS')),
+    h(API.Field, { key: 'copyall', childrenLayout: layout, label: 'CSS skeleton', description: 'Every selector below with an empty rule and a comment, ready to paste into your theme.' },
+      h(Btn, { onClick: e => copy(cssSkeleton(), 'CSS skeleton copied', e), style: small }, 'Copy CSS')),
     h(API.Field, { key: 'tip', label: 'Tip', description: 'Scope your rules with .amw-root so they only affect this window. Open the window, then use Steam\'s DevTools to inspect it.' }, null),
-    h(API.Field, { key: 'sections', label: 'Class names', description: 'Open a section to see its class names.' },
-      h('div', { style: { display: 'flex', gap: 8 } },
-        h(Btn, { onClick: () => setAll(true), style: { flex: 'none', width: 'auto', whiteSpace: 'nowrap', padding: '0 14px' } }, 'Expand all'),
-        h(Btn, { onClick: () => setAll(false), style: { flex: 'none', width: 'auto', whiteSpace: 'nowrap', padding: '0 14px' } }, 'Collapse all'))),
+    h(API.Field, { key: 'sections', childrenLayout: layout, label: 'Class names', description: 'Open a section to see its class names.' },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
+        h(Btn, { onClick: () => setAll(true), style: small }, 'Expand all'),
+        h(Btn, { onClick: () => setAll(false), style: small }, 'Collapse all'))),
   ];
 
-  // Steam's own section classes (the ones its Properties window and Millennium's settings use), so the theme styles the headings:
+  // Steam's own section classes (the ones its Properties window and Millennium's settings use), so the theme styles the heading:
   // DialogControlsSection holds a section, SettingsDialogSubHeader is its heading
   const sections = CLASS_DOCS.map(g => {
     const isOpen = !!open[g.group];
-    return h('div', { key: 'g-' + g.group, className: 'DialogControlsSection amw-doc-section' },
-      h('div', {
-        className: 'SettingsDialogSubHeader amw-doc-head', role: 'button', 'aria-expanded': isOpen, onClick: () => toggle(g.group),
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, cursor: 'pointer', userSelect: 'none' },
-      },
-        h('span', null, g.group),
-        h('span', { style: { flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap' } }, g.items.length + '  ' + (isOpen ? '\u25BE' : '\u25B8'))),
-      isOpen ? g.items.map(it => h(API.Field, {
-        key: it.selector, padding: 'compact', bottomSeparator: 'none',
-        label: h('span', { style: mono, title: 'Click to copy', onClick: e => copy(it.selector, it.selector + ' copied', e) }, it.selector),
-        description: it.about,
-      }, null)) : null);
+    return h('div', { key: 'g-' + g.group, className: 'DialogControlsSection amd-section' },
+      h('div', { className: 'SettingsDialogSubHeader amd-head amw-doc-head', role: 'button', 'aria-expanded': isOpen, onClick: () => toggle(g.group) },
+        h('span', { className: 'amd-chev' + (isOpen ? ' amd-open' : '') },
+          h('svg', { viewBox: '0 0 16 16', width: 14, height: 14 },
+            h('path', { d: 'M6 3l5 5-5 5', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }))),
+        h('div', { className: 'amd-titles' },
+          h('div', { className: 'amd-name' }, g.group),
+          g.blurb ? h('div', { className: 'amd-blurb' }, g.blurb) : null),
+        h('span', { className: 'amd-pill' }, String(g.items.length))),
+      h('div', { className: 'amd-collapse' + (isOpen ? ' amd-open' : ''), 'data-open': String(isOpen), 'aria-hidden': !isOpen },
+        h('div', { className: 'amd-inner' },
+          g.items.map(it => h('div', { key: it.selector, className: 'amd-item' },
+            h('div', { className: 'amd-text' },
+              h('span', { className: 'amd-sel', title: 'Click to copy', onClick: e => copy(it.selector, it.selector + ' copied', e) }, it.selector),
+              h('div', { className: 'amd-desc' }, it.about)),
+            h('span', { className: 'amd-copy', role: 'button', onClick: e => copy(it.selector, it.selector + ' copied', e) }, 'Copy'))))));
   });
 
-  return h('div', { style: { paddingBottom: 24 } },
+  return h('div', { ref: wrapRef, className: 'amd-wrap' + (narrow ? ' amd-narrow' : ''), style: { paddingBottom: 24 } },
+    h('style', null, SETTINGS_CSS),
     copied ? h('div', { style: { position: 'sticky', top: 0, zIndex: 2, padding: '6px 12px', background: 'rgba(0,0,0,.65)', color: '#8fcf5a', fontSize: 13 } }, copied) : null,
     manual ? h('div', { style: { margin: '8px 0 12px', padding: 12, background: 'rgba(0,0,0,.35)', borderRadius: 4 } },
       h('div', { style: { marginBottom: 8, fontSize: 13 } }, 'Steam did not allow copying automatically. The text is selected: press Ctrl+C to copy it.'),
@@ -1147,8 +1202,8 @@ function SettingsPanel() {
         onFocus: e => e.target.select(),
         style: { width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, "Courier New", monospace', fontSize: 12, background: 'rgba(0,0,0,.4)', color: 'inherit', border: '1px solid rgba(255,255,255,.2)', padding: 8 },
       }),
-      h('div', { style: { marginTop: 8 } }, h(Btn, { onClick: () => setManual(''), style: { flex: 'none', width: 'auto', padding: '0 14px' } }, 'Close'))) : null,
-    top, sections);
+      h('div', { style: { marginTop: 8 } }, h(Btn, { onClick: () => setManual(''), style: small }, 'Close'))) : null,
+    top, h('div', { className: 'amd-sections' }, sections));
 }
 
 async function main() {
