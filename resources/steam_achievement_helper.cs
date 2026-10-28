@@ -58,6 +58,17 @@ namespace SteamAchievementSync
             return remaining.ToArray();
         }
 
+        // true when Steam itself says an account is signed in (HKCU\Software\Valve\Steam\ActiveProcess\ActiveUser is not 0)
+        static bool SomeoneIsSignedIn()
+        {
+            try
+            {
+                object value = Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam\ActiveProcess", "ActiveUser", null);
+                return value is int && (int)value != 0;
+            }
+            catch (Exception) { return false; }
+        }
+
         static void WriteOutput(string text)
         {
             if (!string.IsNullOrEmpty(ResultFilePath))
@@ -318,7 +329,8 @@ namespace SteamAchievementSync
                 if (user == 0)
                 {
                     releaseSteamPipe(steamClient, pipe);
-                    WriteOutput("{\"ok\":false,\"error\":\"steam_user_not_logged_in\"}");
+                    // Steam signed in but refused the connection for this game: usually an account that does not own it
+                    WriteOutput(SomeoneIsSignedIn() ? "{\"ok\":false,\"error\":\"steam_game_refused\",\"detail\":\"app " + appId + "\"}" : "{\"ok\":false,\"error\":\"steam_user_not_logged_in\"}");
                     return;
                 }
 
