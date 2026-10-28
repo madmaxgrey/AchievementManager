@@ -19,16 +19,24 @@ Grab `achievement-manager.star` from the [Releases](https://github.com/madmaxgre
 
 ## Notes
 
-- Windows only. The helper and the process code are Windows-specific.
-- The button sits next to *View My Achievements* on the game page. If that button is not there, the plugin adds its own button to the achievements section instead.
-- If the game page still shows the old achievements after Apply, leave the page and open it again.
-- Achievement names are in Steam's current language when the schema has it, English otherwise.
+> [!IMPORTANT]
+> **Windows only.** The helper and the process code are Windows-specific.
+
+- It sits next to *View My Achievements* on the game page. If that button is not there, the plugin adds its own button to the achievements section instead.
+- Achievement names are shown in Steam's current language when the game's schema has it, English otherwise.
+- If the button isn't showing, you can still open the manager for any game with a Steam link. Type this in a browser's address bar or press `Win + R`:
+
+  ```
+  steam://achievementmanager/open/<appid>
+  ```
+
+  For example, `steam://achievementmanager/open/220` opens the manager for Half-Life 2.
 
 ## Building
 
 The plugin is a [Starlight](https://www.npmjs.com/package/@steambrew/starlight) project (`millennium.toml`).
 
-Requirements: [Millennium](https://github.com/SteamClientHomebrew/Millennium) >= v3.6.1 and [Bun](https://bun.com/) >= v1.4.3.
+Requirements: [Millennium](https://github.com/SteamClientHomebrew/Millennium) >= v3.6.2 and [Bun](https://bun.com/) >= v1.4.3.
 
 ```
 git clone https://github.com/madmaxgrey/AchievementManager
