@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.11.1 — Starlight build. Steam's beta removed the tabs of the achievements window, so
+/* Achievement Manager 1.11.2 — Starlight build. Steam's beta removed the tabs of the achievements window, so
  * the manager now opens from a button next to "View My Achievements" in its own Steam-styled window. */
 import { definePlugin, Field } from 'millennium';
 
@@ -122,7 +122,7 @@ const LOCALE_TO_STEAM = {
   'zh-cn': 'schinese', 'zh-hans': 'schinese', 'zh-tw': 'tchinese', 'zh-hant': 'tchinese', ru: 'russian', th: 'thai',
   ja: 'japanese', pt: 'portuguese', 'pt-br': 'brazilian', pl: 'polish', da: 'danish', nl: 'dutch', fi: 'finnish',
   no: 'norwegian', nb: 'norwegian', sv: 'swedish', hu: 'hungarian', cs: 'czech', ro: 'romanian', tr: 'turkish',
-  bg: 'bulgarian', el: 'greek', uk: 'ukrainian', vi: 'vietnamese',
+  bg: 'bulgarian', el: 'greek', uk: 'ukrainian', vi: 'vietnamese', ar: 'arabic', id: 'indonesian',
 };
 function steamLanguage(raw) {
   const key = lower(raw).replace(/_/g, '-');
@@ -175,7 +175,7 @@ function iconUrl(appId, icon) {
   return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
 }
 
-/* Achievement Manager — frontend (1.11.1).
+/* Achievement Manager — frontend (1.11.2).
  *
  * Steam's beta removed the tabs of the achievements window, so the manager now opens from its own button,
  * placed next to "View My Achievements" on a game's library page, and shows a window built to look like
@@ -209,6 +209,7 @@ async function callBackend(method, payload) {
 const ERRORS = {
   steam_not_running: 'Steam did not answer. Make sure the Steam client is running and signed in.',
   steam_user_not_logged_in: 'No Steam account is signed in.',
+  steam_game_refused: 'Steam is signed in, but would not open this game for your account. The account most likely does not own this game.',
   game_stats_not_owned_or_unavailable: 'Steam has no stats for this game on your account. It may not be owned, or it has no achievements.',
   request_current_stats_failed: 'Steam refused the stats request for this game.',
   steam_client_dll_not_found: 'Could not find the Steam client files.',
@@ -630,16 +631,107 @@ const isShown = el => {
   try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && el.offsetParent !== null; } catch (e) { return false; }
 };
 
-// "View My Achievements" (any "View … achievement…" button, in the language Steam shows); a hidden one is skipped, because a
-// copy of it would be hidden too (some themes hide it and show the achievements somewhere else)
+/* The word for "achievement" in each of Steam's languages (stems, so plurals and cases match). Steam translates the button
+ * ("View My Achievements"), so the English words cannot be relied on. Like the Easy Restart plugin, this goes by the language
+ * Steam reports (SteamClient.Settings.GetCurrentLanguage) and looks the text up in a table per language. */
+const ACHIEVEMENT_WORDS = {
+  arabic: ['نجاز'], bulgarian: ['постижени', 'достижени'], schinese: ['成就'], tchinese: ['成就'],
+  czech: ['úspěch', 'úspěš'], danish: ['bedrift', 'præstation'], dutch: ['prestatie'], finnish: ['saavutu'],
+  french: ['succès', 'réussite', 'accomplissement'], german: ['errungenschaft'], greek: ['επιτεύγμ', 'επίτευγμ'], hungarian: ['teljesítmény', 'eredmény'],
+  indonesian: ['pencapaian'], italian: ['obiettiv'], japanese: ['実績'], koreana: ['도전', '업적'],
+  latam: ['logro'], norwegian: ['prestasjon'], polish: ['osiągni'], portuguese: ['conquista'], brazilian: ['conquista'],
+  romanian: ['realiz'], russian: ['достижени'], spanish: ['logro'], swedish: ['prestation'], thai: ['ความสำเร็จ'],
+  turkish: ['başar'], ukrainian: ['досягнен'], vietnamese: ['thành tích', 'thành tựu'],
+};
+
+// lower case and without accents, so "Succès" and "succes" both match; applied to the stems and to the button text alike
+const fold = text => {
+  const t = String(text || '');
+  try { return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); } catch (e) { return t.toLowerCase(); }
+};
+const WORDS = {};
+Object.keys(ACHIEVEMENT_WORDS).forEach(k => { WORDS[k] = ACHIEVEMENT_WORDS[k].map(fold); });
+const ALL_WORDS = [].concat(...Object.keys(WORDS).map(k => WORDS[k]));
+
+// the language Steam shows (a Steam name such as "german"); read again on every tick, so it follows the setting
+let steamUiLanguage = 'english';
+async function readSteamLanguage() {
+  try {
+    const settings = window.SteamClient && window.SteamClient.Settings;
+    const result = settings && typeof settings.GetCurrentLanguage === 'function' ? settings.GetCurrentLanguage() : null;
+    const value = result && typeof result.then === 'function' ? await result : result;
+    if (value) return steamLanguage(String(value));
+  } catch (e) { /* ask the next source */ }
+  try { const l = window.LocalizationManager.m_rgLocalesToUse[0]; if (l) return steamLanguage(String(l)); } catch (e) { /* not exposed */ }
+  return steamLanguage((navigator && navigator.language) || 'english');
+}
+async function refreshLanguage() {
+  try { steamUiLanguage = await readSteamLanguage(); } catch (e) { /* keep the last one */ }
+}
+
+let lastTier = '';
+const noteTier = tier => {
+  if (tier === lastTier) return;
+  lastTier = tier;
+  console.log('[Achievement Manager] button found by: ' + tier + ' (Steam language: ' + steamUiLanguage + ')');
+};
+
+// the shown buttons of a page whose text is short enough to be "View My Achievements" in any language
+function shortButtons(doc) {
+  const out = [];
+  doc.querySelectorAll('button, [role="button"]').forEach(n => {
+    if (n.getAttribute(BTN_ATTR)) return;
+    const text = (n.textContent || '').trim();
+    if (text.length > 0 && text.length < 60 && isShown(n)) out.push({ node: n, text, folded: fold(text) });
+  });
+  return out;
+}
+
+// "View My Achievements", in the language Steam shows; a hidden one is skipped, because a copy of it would be hidden too
+// (some themes hide it and show the achievements somewhere else). Looked for in three steps: the English wording, then the
+// words of Steam's current language, then the words of every language (in case the language could not be read).
 function findAnchor(doc) {
-  const nodes = doc.querySelectorAll('button, [role="button"]');
-  for (const n of nodes) {
-    if (n.getAttribute(BTN_ATTR)) continue;
-    const t = (n.textContent || '').trim().toLowerCase();
-    if (t.length > 0 && t.length < 40 && t.startsWith('view') && t.includes('achievement') && isShown(n)) return n;
+  const buttons = shortButtons(doc);
+  const english = buttons.find(b => b.folded.length < 40 && b.folded.startsWith('view') && b.folded.includes('achievement'));
+  if (english) { noteTier('English wording'); return english.node; }
+  const own = WORDS[steamUiLanguage] || [];
+  if (own.length) {
+    const hit = buttons.find(b => own.some(w => b.folded.includes(w)));
+    if (hit) { noteTier('words of ' + steamUiLanguage); return hit.node; }
+  }
+  const any = buttons.find(b => ALL_WORDS.some(w => b.folded.includes(w)));
+  if (any) { noteTier('words of another language'); return any.node; }
+  return null;
+}
+
+// last resort when no wording matched (a language missing from the table): a button that sits inside an element whose class
+// mentions achievements, on a page that is a game's (the game can be told from the button)
+function findLooseAnchor(doc) {
+  for (const b of shortButtons(doc)) {
+    let area = false, el = b.node.parentElement;
+    for (let depth = 0; el && depth < 5; depth++, el = el.parentElement) {
+      if (/achievement/i.test(el.getAttribute('class') || '')) { area = true; break; }
+    }
+    if (!area) continue;
+    let info = null;
+    try { info = appFromElement(b.node); } catch (e) { info = null; }
+    if (info) { noteTier('a button in the achievements area'); return b.node; }
   }
   return null;
+}
+
+// for bug reports: what Steam's language is and which buttons the page has (__achievementManager.buttons())
+function describeButtons() {
+  const lib = libraryWindow();
+  const doc = lib && lib.win.document;
+  if (!doc) return { language: steamUiLanguage, error: 'the library window was not found' };
+  const found = findAnchor(doc);
+  return {
+    language: steamUiLanguage,
+    words: WORDS[steamUiLanguage] || null,
+    found: found ? (found.textContent || '').trim() : null,
+    buttons: shortButtons(doc).map(b => b.text),
+  };
 }
 
 // the achievements section of the game page, for when there is no usable "View My Achievements" button
@@ -766,7 +858,7 @@ function onButtonClick(btn, doc, fallbackSource) {
 }
 
 function ensureButton(doc) {
-  const anchor = findAnchor(doc);
+  const anchor = findAnchor(doc) || (findSection(doc) ? null : findLooseAnchor(doc));
 
   if (anchor && anchor.parentNode) {
     const prev = anchor.previousElementSibling, next = anchor.nextElementSibling;
@@ -823,6 +915,7 @@ function attach(doc, win) {
 
 function start() {
   const tick = () => {
+    refreshLanguage();
     const lib = libraryWindow();
     const doc = lib && lib.win.document;
     if (doc && doc.body) {
@@ -830,7 +923,7 @@ function start() {
       try { ensureButton(doc); } catch (e) { console.error('[Achievement Manager] could not add the button', e); }
     } else if (observedDoc) detach();
   };
-  tick();
+  refreshLanguage().then(tick, tick);            // know Steam's language before the first look for the button
   // the library window can be closed and opened again, and Steam can redraw the page without a visible change
   poll = setInterval(tick, 1500);
 }
@@ -838,6 +931,32 @@ function start() {
 function dispose() {
   clearInterval(poll); clearTimeout(debounce);
   detach();
+  try { if (urlHandle && typeof urlHandle.unregister === 'function') urlHandle.unregister(); } catch (e) { /* ignore */ }
+  urlHandle = null;
+}
+
+/* ═════════════ steam:// link ═════════════ */
+
+/* A Steam link of the plugin, like Extendium's steam://extendium/manager (it works in a browser's address bar and in Win + R):
+ *   steam://achievementmanager/open/<appid>   the manager for that game, for when the button is missing */
+let lastUrl = '', lastUrlAt = 0, urlHandle = null;
+function handleSteamUrl(_, url) {
+  const now = Date.now();
+  if (url === lastUrl && now - lastUrlAt < 800) return;   // Steam can deliver one link twice (or twice after a plugin reload)
+  lastUrl = url; lastUrlAt = now;
+  const parts = String(url || '').replace(/^steam:\/{1,2}/i, '/').split('/').filter(r => r).slice(1);
+  const action = (parts[0] || '').toLowerCase();
+  try {
+    if (action === 'open' && /^\d+$/.test(parts[1] || '')) openWindow(parts[1], '');
+    else console.warn('[Achievement Manager] unknown link:', url);
+  } catch (e) { console.error('[Achievement Manager] could not handle the link', url, e); }
+}
+function registerSteamUrl() {
+  try {
+    const reg = window.SteamClient && window.SteamClient.URL && window.SteamClient.URL.RegisterForRunSteamURL;
+    if (typeof reg === 'function') urlHandle = reg.call(window.SteamClient.URL, 'achievementmanager', handleSteamUrl);
+    else console.warn('[Achievement Manager] SteamClient.URL.RegisterForRunSteamURL is not available; the steam:// links will not work');
+  } catch (e) { console.error('[Achievement Manager] could not register the steam:// links', e); }
 }
 
 /* ═════════════ theming reference (shown in the plugin's settings) ═════════════ */
@@ -1213,6 +1332,8 @@ async function main() {
     open: (appId, name) => openWindow(appId, name || ''),
     // every class name the window uses (also in the plugin's settings): __achievementManager.classes()
     classes: () => CLASS_DOCS,
+    // Steam's language and the buttons of the library page, for bug reports when the button does not show: __achievementManager.buttons()
+    buttons: describeButtons,
     // what the window found in its own page (for bug reports): are Steam's Properties-window classes styled, and the theme accent
     look: () => { const el = document.querySelector('.amw-root'); return el ? { classes: el.className, fallback: el.classList.contains('amw-fallback') } : null; },
   };
@@ -1221,6 +1342,7 @@ async function main() {
     if (typeof App !== 'undefined' && App.WaitForServicesInitialized) await App.WaitForServicesInitialized();
     else await new Promise(r => setTimeout(r, 3000));
   } catch (e) { /* carry on */ }
+  registerSteamUrl();
   start();
 }
 
