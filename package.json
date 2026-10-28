@@ -1,6 +1,6 @@
 {
   "name": "achievement-manager",
-  "version": "1.11.1",
+  "version": "1.11.2",
   "scripts": {
     "dev": "./node_modules/.bin/starlight watch",
     "build": "./node_modules/.bin/starlight pack",
