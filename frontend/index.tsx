@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.11.2 — Starlight build. Steam's beta removed the tabs of the achievements window, so
+/* Achievement Manager 1.12 — Starlight build. Steam's beta removed the tabs of the achievements window, so
  * the manager now opens from a button next to "View My Achievements" in its own Steam-styled window. */
 import { definePlugin, Field } from 'millennium';
 
@@ -175,7 +175,7 @@ function iconUrl(appId, icon) {
   return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
 }
 
-/* Achievement Manager — frontend (1.11.2).
+/* Achievement Manager — frontend (1.12 beta).
  *
  * Steam's beta removed the tabs of the achievements window, so the manager now opens from its own button,
  * placed next to "View My Achievements" on a game's library page, and shows a window built to look like
@@ -215,13 +215,23 @@ const ERRORS = {
   steam_client_dll_not_found: 'Could not find the Steam client files.',
   csc_not_found: 'The .NET Framework 4 compiler (csc.exe) was not found; the helper could not be built.',
   compilation_failed: 'The helper program could not be built.',
-  helper_source_missing: 'The plugin is missing resources/steam_achievement_helper.cs.',
+  helper_source_missing: 'The plugin is missing its helper file in resources/ (steam_achievement_helper.cs on Windows, steam_achievement_helper.py on Linux).',
+  python_not_found: 'Python 3 was not found. On Linux the helper needs python3 (3.6 or newer); install it with your distribution\'s package manager.',
+  python_too_old: 'The installed Python is too old; the helper needs Python 3.6 or newer.',
+  helper_failed: 'The helper stopped without giving an answer.',
+  helper_write_failed: 'The helper could not be written to disk.',
+  unsupported_platform: 'This operating system is not supported; the plugin works on Windows and Linux.',
   empty_output: 'The helper gave no answer (it may have timed out).',
   busy: 'Another request is still running. Try again in a moment.',
   store_stats_not_confirmed: 'Steam did not confirm that the changes were saved.',
   invalid_appid: 'This game has no usable app ID.',
 };
-const explain = res => ERRORS[res && res.error] || `Something went wrong (${(res && res.error) || 'unknown'}${res && res.detail ? ': ' + res.detail : ''}).`;
+const explain = res => {
+  const code = res && res.error;
+  const detail = res && res.detail ? String(res.detail) : '';
+  if (ERRORS[code]) return detail ? `${ERRORS[code]} (${detail})` : ERRORS[code];
+  return `Something went wrong (${code || 'unknown'}${detail ? ': ' + detail : ''}).`;
+};
 
 
 // Steam's logo, as a 24x24 SVG path (drawn in the loading screen)
