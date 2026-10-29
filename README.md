@@ -20,7 +20,7 @@ Grab `achievement-manager.star` from the [Releases](https://github.com/madmaxgre
 ## Notes
 
 > [!IMPORTANT]
-> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed. Steam Deck / SteamOS, immutable distributions and Flatpak Steam are not supported.
+> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed. Steam Deck / SteamOS, immutable distributions are not supported.
 
 - It sits next to *View My Achievements* on the game page. If that button is not there, the plugin adds its own button to the achievements section instead.
 - Achievement names are shown in Steam's current language when the game's schema has it, English otherwise.
