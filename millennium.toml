@@ -1,12 +1,12 @@
 [plugin]
 id = "achievement-manager"
 name = "Achievement Manager"
-version = "1.11.2"
+version = "1.12"
 author = "madmaxgrey"
 description = "An Achievement Manager tab in the library's achievements window: unlock or lock achievements on your Steam account, using Steam's own controls."
 
 [assets]
-# the C# helper is bundled as a resource; the backend writes it out and compiles it on first use
+# the helpers are bundled as resources: on Windows the backend writes out and compiles the C# helper on first use, on Linux it runs the Python helper
 resources = ["resources/**/*"]
 
 [backend]

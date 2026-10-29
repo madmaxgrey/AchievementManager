@@ -12,7 +12,7 @@ A [Millennium](https://steambrew.app) plugin that adds an **Achievement Manager*
 
 Grab `achievement-manager.star` from the [Releases](https://github.com/madmaxgrey/AchievementManager/releases) page, or build it from this source (see *Building* below).
 
-1. Copy `achievement-manager.star` into `<Steam>\millennium\plugins\`.
+1. Copy `achievement-manager.star` into Millennium's plugins folder: `<Steam>\millennium\plugins\` on Windows, `~/.local/share/millennium/plugins/` on Linux.
 2. Open **Millennium → Plugins**, enable **Achievement Manager**, restart if asked.
 3. Open a game's page in your library and click **Achievement Manager**, the button next to *View My Achievements*.
 
@@ -20,14 +20,20 @@ Grab `achievement-manager.star` from the [Releases](https://github.com/madmaxgre
 ## Notes
 
 > [!IMPORTANT]
-> **Windows only.** The helper and the process code are Windows-specific.
+> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed. Steam Deck / SteamOS, immutable distributions and Flatpak Steam are not supported.
 
 - It sits next to *View My Achievements* on the game page. If that button is not there, the plugin adds its own button to the achievements section instead.
 - Achievement names are shown in Steam's current language when the game's schema has it, English otherwise.
-- If the button isn't showing, you can still open the manager for any game with a Steam link. Type this in a browser's address bar or press `Win + R`:
+- If the button isn't showing, you can still open the manager for any game with a Steam link. Type this in a browser's address bar or, on Windows, press `Win + R`:
 
   ```
   steam://achievementmanager/open/<appid>
+  ```
+
+  On Linux you can also run it in a terminal:
+
+  ```
+  steam steam://achievementmanager/open/<appid>
   ```
 
   For example, `steam://achievementmanager/open/220` opens the manager for Half-Life 2.
@@ -53,7 +59,8 @@ bun run build     # packs achievement-manager.star and installs it into Millenni
 millennium.toml                      manifest (plugin id, backend, frontend, resources)
 backend/main.lua                     load / unload hooks
 backend/rpc_functions.lua            am_status / am_apply, helper build + launch
-resources/steam_achievement_helper.cs   the Steam client helper (bundled, compiled on first use)
+resources/steam_achievement_helper.cs   the Windows Steam client helper (bundled, compiled on first use)
+resources/steam_achievement_helper.py   the Linux Steam client helper (bundled, run with python3)
 frontend/index.tsx                   button injection, the manager window and the Steam stats schema reader
 ```
 
