@@ -175,7 +175,7 @@ function iconUrl(appId, icon) {
   return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
 }
 
-/* Achievement Manager — frontend (1.12 beta).
+/* Achievement Manager — frontend (1.12).
  *
  * Steam's beta removed the tabs of the achievements window, so the manager now opens from its own button,
  * placed next to "View My Achievements" on a game's library page, and shows a window built to look like
