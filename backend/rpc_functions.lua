@@ -1,9 +1,11 @@
 -- Achievement Manager — backend.
 --
--- Runs a small helper program (resources/steam_achievement_helper.cs, compiled on first use with the
--- .NET Framework compiler that ships with Windows) that talks to the running Steam client, reads the game's
--- achievement list and unlocks / locks achievements on the signed-in account. The process handling is
--- adapted from NativeGameLink for Steam (MIT, David Miranda); see LICENSE.
+-- Runs a small helper program that talks to the running Steam client, reads the game's achievement list and unlocks /
+-- locks achievements on the signed-in account. The backend detects the operating system and picks the helper:
+--   Windows: resources/steam_achievement_helper.cs, compiled on first use with the .NET Framework compiler that ships
+--            with Windows. The process handling is adapted from NativeGameLink for Steam (MIT, David Miranda); see LICENSE.
+--   Linux:   resources/steam_achievement_helper.py, run with the system's python3 (standard library only).
+-- Both write the same JSON, so everything after "run the helper" is shared.
 --
 -- Frontend-callable functions (Millennium finds them by global name):
 --   am_status(request)  -> JSON: every achievement's state, plus Steam's own schema file (hex) for names/icons
@@ -45,10 +47,26 @@ if not fs_ok or type(fs) ~= "table" or not fs.join then
     }
 end
 
+-- which operating system the plugin runs on: "windows", "linux" or "other" (anything else, such as macOS)
+local function detect_platform()
+    local ok, name = pcall(function() return jit and jit.os end)
+    if ok and type(name) == "string" then
+        if name == "Windows" then return "windows" end
+        if name == "Linux" then return "linux" end
+        return "other"
+    end
+    if package.config and package.config:sub(1, 1) == "\\" then return "windows" end
+    local proc = io.open("/proc/version", "rb")
+    if proc then proc:close() return "linux" end
+    return "other"
+end
+
+local PLATFORM = detect_platform()
+
 local ffi_ok, ffi = pcall(require, "ffi")
 local kernel32 = nil
 
-if ffi_ok and ffi then
+if PLATFORM == "windows" and ffi_ok and ffi then
     local defined = pcall(function()
         ffi.cdef[[
         typedef unsigned long DWORD;
@@ -196,11 +214,128 @@ local function steam_path()
     return nil
 end
 
+-- ---------------------------------------------------------------------------------------------- Linux
+-- Everything below is used on Linux only. The helper is a Python script that is written to a per-user folder (never to
+-- the shared /tmp, where another user could swap the file) and started through the shell with a clean environment:
+-- Steam's own LD_PRELOAD / LD_LIBRARY_PATH would otherwise leak into python.
+
+local function shell_quote(text)
+    return "'" .. tostring(text):gsub("'", "'\\''") .. "'"
+end
+
+local function file_exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() return true end
+    return false
+end
+
+local function path_join(...)
+    if PLATFORM == "windows" then return fs.join(...) end
+    return (table.concat({ ... }, "/"):gsub("//+", "/"))
+end
+
+local function linux_work_dir()
+    local base = os.getenv("XDG_CACHE_HOME")
+    if not base or base == "" then
+        local home = os.getenv("HOME")
+        if not home or home == "" then return nil end
+        base = home .. "/.cache"
+    end
+    local dir = base .. "/achievement-manager"
+    pcall(os.execute, "mkdir -p -m 700 " .. shell_quote(dir))
+    return dir
+end
+
+local function find_python()
+    for _, candidate in ipairs({ "/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3" }) do
+        if file_exists(candidate) then return candidate end
+    end
+    local ok, pipe = pcall(io.popen, "command -v python3 2>/dev/null")
+    if ok and pipe then
+        local found = pipe:read("*l")
+        pipe:close()
+        if found and found:sub(1, 1) == "/" and file_exists(found) then return found end
+    end
+    return nil
+end
+
+-- the script's file name carries a hash of its source, so an updated helper never runs as an old script
+local function linux_helper_script(dir)
+    local ok, source = pcall(function() return millennium.assets.read("resources/steam_achievement_helper.py") end)
+    if not ok or type(source) ~= "string" or source == "" then return nil, "helper_source_missing" end
+    local hash = 5381
+    for i = 1, #source do hash = (hash * 33 + source:byte(i)) % 4294967296 end
+    local script = string.format("%s/achievement_manager_helper_%08x.py", dir, hash)
+    if file_exists(script) then return script end
+    local f = io.open(script, "wb")
+    if not f then return nil, "helper_write_failed", script end
+    f:write(source)
+    f:close()
+    return script
+end
+
+local function tidy(text, limit)
+    return ((text or ""):gsub("[%c]+", " | "):gsub("%s+", " "):sub(1, limit))
+end
+
+-- Linux counterpart of the Windows part of run_helper; returns the same things: the raw JSON text, or nil, code, detail
+local function run_helper_linux(arguments, arg_lines, steam, sequence_stamp)
+    local dir = linux_work_dir()
+    if not dir then return nil, "helper_write_failed", "no home folder" end
+    local python = find_python()
+    if not python then return nil, "python_not_found" end
+    local script, why, detail = linux_helper_script(dir)
+    if not script then return nil, why, detail end
+
+    local result_path = string.format("%s/result_%s.json", dir, sequence_stamp)
+    local log_path = string.format("%s/run_%s.log", dir, sequence_stamp)
+    pcall(os.remove, result_path)
+
+    local args_path = nil
+    if arg_lines and #arg_lines > 0 then
+        args_path = string.format("%s/args_%s.txt", dir, sequence_stamp)
+        local f = io.open(args_path, "wb")
+        if not f then return nil, "args_file_failed" end
+        f:write(table.concat(arg_lines, "\n"))
+        f:close()
+    end
+
+    -- a clean environment: no preloaded overlay, no Steam runtime libraries; only Steam's own 64-bit folder is on the library path
+    local env = "env -u LD_PRELOAD -u PYTHONHOME -u PYTHONPATH"
+    if steam then env = env .. " LD_LIBRARY_PATH=" .. shell_quote(steam .. "/linux64")
+    else env = env .. " -u LD_LIBRARY_PATH" end
+
+    local command = string.format("%s timeout 25 %s %s %s --result-file %s", env, shell_quote(python), shell_quote(script), arguments, shell_quote(result_path))
+    if steam then command = command .. " --steam-path " .. shell_quote(steam) end
+    if args_path then command = command .. " --args-file " .. shell_quote(args_path) end
+    -- python's own messages and the exit status go to a log, shown when the helper writes no answer
+    command = command .. " > " .. shell_quote(log_path) .. " 2>&1; echo \"exit status $?\" >> " .. shell_quote(log_path)
+
+    pcall(os.execute, command)
+
+    local output = read_all(result_path)
+    local log = read_all(log_path)
+    pcall(os.remove, result_path)
+    pcall(os.remove, log_path)
+    if args_path then pcall(os.remove, args_path) end
+    if not output or output == "" then
+        return nil, "helper_failed", (log and log ~= "") and tidy(log, 400) or nil
+    end
+    return output
+end
+
 local sequence = 0
 local busy = false
 
 -- run the helper with `arguments` (a string such as "status 220"); returns the raw JSON text it wrote
 local function run_helper(arguments, arg_lines)
+    if PLATFORM == "linux" then
+        sequence = (sequence + 1) % 1000000
+        return run_helper_linux(arguments, arg_lines, steam_path(), tostring(os.time()) .. "_" .. tostring(sequence))
+    elseif PLATFORM ~= "windows" then
+        return nil, "unsupported_platform", tostring(jit and jit.os or "unknown")
+    end
+
     local exe, why = helper_exe()
     if not exe then return nil, why end
 
@@ -290,8 +425,8 @@ function am_status(request)
         local id = data.steam_app_id
         if not valid_appid(id) then return fail("invalid_appid") end
 
-        local raw, err = run_helper("status " .. id)
-        if not raw then return fail(err or "status_failed") end
+        local raw, err, detail = run_helper("status " .. id)
+        if not raw then return fail(err or "status_failed", detail) end
 
         local decoded_ok, decoded = pcall(json.decode, raw)
         if not decoded_ok or type(decoded) ~= "table" then return fail("json_parse_failed", raw:sub(1, 200)) end
@@ -300,14 +435,14 @@ function am_status(request)
         -- Steam writes the game's stats schema while the helper waits for the stats; hand it over as hex
         -- (the achievement names, descriptions and icons live there). The helper's text is spliced, not
         -- re-encoded, so the achievements keep Steam's order.
-        local schema_path = fs.join(steam_path() or "", "appcache", "stats", "UserGameStatsSchema_" .. id .. ".bin")
+        local schema_path = path_join(steam_path() or "", "appcache", "stats", "UserGameStatsSchema_" .. id .. ".bin")
         local schema = read_all(schema_path)
         local body = raw:match("^(.*)}%s*$")
         if not body then return fail("json_parse_failed") end
         if schema and #schema > 0 then
-            return body .. ',"schema_found":true,"schema_bytes":' .. #schema .. ',"schema_hex":"' .. hex_of(schema) .. '"}'
+            return body .. ',"platform":"' .. PLATFORM .. '","schema_found":true,"schema_bytes":' .. #schema .. ',"schema_hex":"' .. hex_of(schema) .. '"}'
         end
-        return body .. ',"schema_found":false}'
+        return body .. ',"platform":"' .. PLATFORM .. '","schema_found":false}'
     end)
 end
 
@@ -331,8 +466,8 @@ function am_apply(request)
         end
         if #lines == 0 then return fail("nothing_to_apply") end
 
-        local raw, err = run_helper("sync " .. id, lines)
-        if not raw then return fail(err or "sync_failed") end
+        local raw, err, detail = run_helper("sync " .. id, lines)
+        if not raw then return fail(err or "sync_failed", detail) end
         local decoded_ok, decoded = pcall(json.decode, raw)
         if not decoded_ok or type(decoded) ~= "table" then return fail("json_parse_failed", raw:sub(1, 200)) end
         logger:info(string.format("Achievement Manager: app %s, +%s -%s, ok=%s", id,
@@ -341,4 +476,4 @@ function am_apply(request)
     end)
 end
 
-logger:info("Achievement Manager: RPC functions registered")
+logger:info("Achievement Manager: RPC functions registered (" .. PLATFORM .. ")")
