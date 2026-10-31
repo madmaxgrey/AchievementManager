@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.12 — Starlight build. Steam's beta removed the tabs of the achievements window, so
+/* Achievement Manager 1.12.1 — Starlight build. Steam's beta removed the tabs of the achievements window, so
  * the manager now opens from a button next to "View My Achievements" in its own Steam-styled window. */
 import { definePlugin, Field } from 'millennium';
 
@@ -175,7 +175,7 @@ function iconUrl(appId, icon) {
   return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
 }
 
-/* Achievement Manager — frontend (1.12).
+/* Achievement Manager — frontend (1.12.1).
  *
  * Steam's beta removed the tabs of the achievements window, so the manager now opens from its own button,
  * placed next to "View My Achievements" on a game's library page, and shows a window built to look like
@@ -697,19 +697,35 @@ function shortButtons(doc) {
   return out;
 }
 
+// Where a copy may go, and where never. A button with similar words that is NOT Steam's own "View My Achievements" (a filter,
+// a collection's header, an entry of a drop-down or context menu, a dialog) must never get a copy, so a candidate has to sit in
+// the achievements section of a game's page, or belong to a game (the app id can be read from it); and anything inside a menu,
+// list, dialog or tooltip is out. Only the loose wording searches below insist on the section itself.
+const NOT_HERE = '[role="menu"],[role="menuitem"],[role="listbox"],[role="option"],[role="dialog"],[role="tooltip"],[class*="contextmenu" i],[class*="dropdown" i]';
+function gate(node, strict) {
+  try {
+    if (node.closest(NOT_HERE)) return false;
+    if (node.closest('[class*="achievementssection" i]')) return true;
+    return !strict && !!appFromElement(node);
+  } catch (e) { return false; }
+}
+
 // "View My Achievements", in the language Steam shows; a hidden one is skipped, because a copy of it would be hidden too
 // (some themes hide it and show the achievements somewhere else). Looked for in three steps: the English wording, then the
-// words of Steam's current language, then the words of every language (in case the language could not be read).
+// words of Steam's current language, then the words of every language (in case the language could not be read); the last
+// step only counts inside the achievements section.
 function findAnchor(doc) {
   const buttons = shortButtons(doc);
-  const english = buttons.find(b => b.folded.length < 40 && b.folded.startsWith('view') && b.folded.includes('achievement'));
+  // of several candidates the one inside the achievements section wins
+  const pick = list => list.find(b => { try { return !!b.node.closest('[class*="achievementssection" i]'); } catch (e) { return false; } }) || list[0] || null;
+  const english = pick(buttons.filter(b => b.folded.length < 40 && b.folded.startsWith('view') && b.folded.includes('achievement') && gate(b.node, false)));
   if (english) { noteTier('English wording'); return english.node; }
   const own = WORDS[steamUiLanguage] || [];
   if (own.length) {
-    const hit = buttons.find(b => own.some(w => b.folded.includes(w)));
+    const hit = pick(buttons.filter(b => own.some(w => b.folded.includes(w)) && gate(b.node, false)));
     if (hit) { noteTier('words of ' + steamUiLanguage); return hit.node; }
   }
-  const any = buttons.find(b => ALL_WORDS.some(w => b.folded.includes(w)));
+  const any = pick(buttons.filter(b => ALL_WORDS.some(w => b.folded.includes(w)) && gate(b.node, true)));
   if (any) { noteTier('words of another language'); return any.node; }
   return null;
 }
@@ -722,7 +738,7 @@ function findLooseAnchor(doc) {
     for (let depth = 0; el && depth < 5; depth++, el = el.parentElement) {
       if (/achievement/i.test(el.getAttribute('class') || '')) { area = true; break; }
     }
-    if (!area) continue;
+    if (!area || !gate(b.node, false)) continue;
     let info = null;
     try { info = appFromElement(b.node); } catch (e) { info = null; }
     if (info) { noteTier('a button in the achievements area'); return b.node; }
@@ -809,45 +825,93 @@ function flash(btn, text) {
   setTimeout(() => { if (btn.getAttribute(BTN_ATTR)) btn.textContent = old === text ? TITLE : old; }, 3500);
 }
 
-// is the button cut off by a parent that clips its content, or outside the window?
-function isClipped(btn) {
+// The copy is locked to the original: its place is worked out again from the original's own box whenever that box changes
+// (a size watcher, the page's redraws, and a quick check every quarter of a second), so it cannot drift, lag behind or stay
+// where the original used to be. Where it goes is decided each time, never remembered:
+//   'left'   beside the original, to its left, whatever the page's layout is (row, column, pinned to a corner);
+//   'below'  under the original, in the page's flow, only when there is no room on the left: it never lands on top of the
+//            original, never sticks out of a clipping parent, and goes back to the left as soon as there is room again;
+//   'inside' at the end of the achievements section (there is no usable button to sit beside).
+const GAP = 8, HYSTERESIS = 12;
+
+// would a button of this width, to the left of the original, be cut off by the window or by a parent that clips its content?
+function clipsAt(anchor, width) {
   try {
-    const view = btn.ownerDocument.defaultView;
-    const r = btn.getBoundingClientRect();
-    if (r.left < 0) return true;
-    for (let el = btn.parentElement; el && el !== btn.ownerDocument.body; el = el.parentElement) {
-      if (/(hidden|auto|scroll|clip)/.test(view.getComputedStyle(el).overflowX) && r.left < el.getBoundingClientRect().left - 1) return true;
+    const view = anchor.ownerDocument.defaultView;
+    const left = anchor.getBoundingClientRect().left - width - GAP;
+    if (left < 0) return true;
+    for (let el = anchor.parentElement; el && el !== anchor.ownerDocument.body; el = el.parentElement) {
+      if (/(hidden|auto|scroll|clip)/.test(view.getComputedStyle(el).overflowX) && left < el.getBoundingClientRect().left - 1) return true;
     }
   } catch (e) { /* cannot tell */ }
   return false;
 }
 
-// Where the copy goes. 'left': beside the original, to its left, whatever the page's layout is (row, column, pinned to a corner).
-// 'below': under the original, full width of it, in the page's flow (themes that move the achievements into a narrow panel).
-// 'inside': at the end of the achievements section (there is no usable button to sit beside).
-function place(btn, anchor) {
+const setStyle = (el, props) => { for (const k of Object.keys(props)) { if (el.style[k] !== props[k]) el.style[k] = props[k]; } };
+
+function pin(btn, anchor) {
   try {
     const mode = btn.getAttribute('data-amw-mode');
-    if (mode === 'inside') return;
-    if (mode === 'below') {
-      btn.style.position = 'static'; btn.style.display = 'block'; btn.style.margin = '6px 0 0';
-      btn.style.left = ''; btn.style.top = ''; btn.style.height = '';
-      btn.style.width = anchor.offsetWidth ? anchor.offsetWidth + 'px' : '';
+    if (mode === 'inside' || !anchor.parentNode) return;
+    if (!btn.__amwWidth) {                                   // its own width, measured once, loose in the page
+      setStyle(btn, { position: 'absolute', margin: '0', width: '', left: '0px', zIndex: '0' });
+      btn.__amwWidth = btn.offsetWidth || 0;
+    }
+    const width = btn.__amwWidth;
+    const wasBelow = mode === 'below';
+    const room = anchor.offsetLeft - width - GAP;            // where its left edge would be, in the original's own container
+    const fits = width > 0 && room >= (wasBelow ? HYSTERESIS : 0) && !clipsAt(anchor, width + (wasBelow ? HYSTERESIS : 0));
+
+    if (!fits) {
+      if (mode !== 'below') btn.setAttribute('data-amw-mode', 'below');
+      if (anchor.nextElementSibling !== btn) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+      setStyle(btn, { position: 'static', display: 'block', margin: '6px 0 0', left: '', top: '', height: '', zIndex: '0',
+        width: anchor.offsetWidth ? anchor.offsetWidth + 'px' : '' });
       return;
     }
-    btn.style.position = 'absolute';
-    btn.style.margin = '0';
-    btn.style.right = 'auto';
-    btn.style.bottom = 'auto';
-    btn.style.left = Math.max(0, anchor.offsetLeft - btn.offsetWidth - 8) + 'px';
-    btn.style.top = anchor.offsetTop + 'px';
-    if (anchor.offsetHeight) btn.style.height = anchor.offsetHeight + 'px';
-    if (isClipped(btn)) {                       // no room on the left: go under the original instead
-      btn.setAttribute('data-amw-mode', 'below');
-      anchor.parentNode.insertBefore(btn, anchor.nextSibling);
-      place(btn, anchor);
-    }
+    if (mode !== 'left') btn.setAttribute('data-amw-mode', 'left');
+    if (btn.nextElementSibling !== anchor) anchor.parentNode.insertBefore(btn, anchor);
+    setStyle(btn, { position: 'absolute', display: '', margin: '0', right: 'auto', bottom: 'auto', width: '', zIndex: '0',
+      left: room + 'px', top: anchor.offsetTop + 'px', height: anchor.offsetHeight ? anchor.offsetHeight + 'px' : '' });
   } catch (e) { /* layout not available */ }
+}
+
+// the copy that sits beside this original (before it, or after it when there was no room)
+function mineBeside(anchor) {
+  const prev = anchor.previousElementSibling, next = anchor.nextElementSibling;
+  return prev && prev.getAttribute(BTN_ATTR) ? prev : (next && next.getAttribute(BTN_ATTR) ? next : null);
+}
+
+// keep the copy locked while the original lives: a size watcher on it and on what holds it, and a quick check
+let sizeWatcher = null, watchedAnchor = null, pinTimer = 0;
+function unwatch() {
+  try { if (sizeWatcher) sizeWatcher.disconnect(); } catch (e) { /* ignore */ }
+  sizeWatcher = null; watchedAnchor = null;
+}
+function watch(anchor, win) {
+  if (watchedAnchor === anchor) return;
+  unwatch();
+  watchedAnchor = anchor;
+  try {
+    const RO = (win && win.ResizeObserver) || window.ResizeObserver;
+    if (!RO) return;
+    sizeWatcher = new RO(() => { const b = mineBeside(anchor); if (b) pin(b, anchor); });
+    sizeWatcher.observe(anchor);
+    if (anchor.parentElement) sizeWatcher.observe(anchor.parentElement);
+    const section = anchor.closest('[class*="achievementssection" i]');
+    if (section) sizeWatcher.observe(section);
+  } catch (e) { /* no size watcher: the quick check still runs */ }
+}
+function quickPin() {
+  const anchor = watchedAnchor;
+  if (!anchor) return;
+  const mine = anchor.isConnected ? mineBeside(anchor) : null;
+  if (!anchor.isConnected || !isShown(anchor)) {              // the original is gone or hidden (another page): so is the copy
+    try { const doc = anchor.ownerDocument; if (doc) doc.querySelectorAll('[' + BTN_ATTR + ']').forEach(n => n.remove()); } catch (e) { /* ignore */ }
+    unwatch();
+    return;
+  }
+  if (mine) pin(mine, anchor);
 }
 
 function onButtonClick(btn, doc, fallbackSource) {
@@ -869,32 +933,33 @@ function onButtonClick(btn, doc, fallbackSource) {
 
 function ensureButton(doc) {
   const anchor = findAnchor(doc) || (findSection(doc) ? null : findLooseAnchor(doc));
+  const all = Array.prototype.slice.call(doc.querySelectorAll('[' + BTN_ATTR + ']'));
 
   if (anchor && anchor.parentNode) {
-    const prev = anchor.previousElementSibling, next = anchor.nextElementSibling;
-    const mine = prev && prev.getAttribute(BTN_ATTR) ? prev : (next && next.getAttribute(BTN_ATTR) ? next : null);
-    if (mine) { place(mine, anchor); return; }                                   // already there; keep it beside the original
-    doc.querySelectorAll('[' + BTN_ATTR + ']').forEach(n => n.remove());         // a copy left from a page Steam has redrawn
-
-    const below = false;
+    const mine = mineBeside(anchor);
+    all.forEach(n => { if (n !== mine) n.remove(); });                           // never more than one, and only beside the real button
+    if (mine) { pin(mine, anchor); watch(anchor, doc.defaultView); return; }     // already there; keep it locked beside the original
 
     const btn = anchor.cloneNode(false);                                          // same classes: the theme's own look for Steam's buttons
+    btn.removeAttribute('id');
     btn.setAttribute(BTN_ATTR, '1');
-    btn.setAttribute('data-amw-mode', below ? 'below' : 'left');
+    btn.setAttribute('data-amw-mode', 'left');
     btn.textContent = TITLE;
     btn.addEventListener('click', onButtonClick(btn, doc, anchor));
-    anchor.parentNode.insertBefore(btn, below ? anchor.nextSibling : anchor);
-    place(btn, anchor);
+    anchor.parentNode.insertBefore(btn, anchor);
+    pin(btn, anchor);
+    watch(anchor, doc.defaultView);
     const view = doc.defaultView;
-    (view && view.requestAnimationFrame ? view.requestAnimationFrame.bind(view) : setTimeout)(() => place(btn, anchor));
+    (view && view.requestAnimationFrame ? view.requestAnimationFrame.bind(view) : setTimeout)(() => pin(btn, anchor));
     return;
   }
+  unwatch();
 
   // no usable button: a theme that hides it still shows the achievements section, so put our own button in that
   const section = findSection(doc);
-  if (!section) return;
-  if (section.querySelector('[' + BTN_ATTR + ']')) return;
-  doc.querySelectorAll('[' + BTN_ATTR + ']').forEach(n => n.remove());
+  if (!section) { all.forEach(n => n.remove()); return; }                         // nothing of Steam's achievements here: no button either
+  if (section.querySelector('[' + BTN_ATTR + ']')) { all.forEach(n => { if (!section.contains(n)) n.remove(); }); return; }
+  all.forEach(n => n.remove());
   const btn = doc.createElement('button');
   btn.className = 'DialogButton _DialogLayout Secondary Focusable';                // Steam's own dialog button classes, so a theme styles it
   btn.setAttribute('role', 'button');
@@ -912,6 +977,7 @@ function detach() {
   try { if (observer) observer.disconnect(); } catch (e) { /* ignore */ }
   try { if (observedDoc) observedDoc.querySelectorAll('[' + BTN_ATTR + ']').forEach(n => n.remove()); } catch (e) { /* window gone */ }
   observer = null; observedDoc = null;
+  unwatch();
 }
 
 function attach(doc, win) {
@@ -936,10 +1002,11 @@ function start() {
   refreshLanguage().then(tick, tick);            // know Steam's language before the first look for the button
   // the library window can be closed and opened again, and Steam can redraw the page without a visible change
   poll = setInterval(tick, 1500);
+  pinTimer = setInterval(quickPin, 250);
 }
 
 function dispose() {
-  clearInterval(poll); clearTimeout(debounce);
+  clearInterval(poll); clearInterval(pinTimer); clearTimeout(debounce);
   detach();
   try { if (urlHandle && typeof urlHandle.unregister === 'function') urlHandle.unregister(); } catch (e) { /* ignore */ }
   urlHandle = null;
