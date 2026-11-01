@@ -4,6 +4,7 @@ A [Millennium](https://steambrew.app) plugin that adds an **Achievement Manager*
 
 - every achievement of the game as a card: icon, name, description, unlock date, **toggle**
 - a navigation column that filters the list: **All achievements / Unlocked / Locked / Changed**, with counts; search and sort on top
+- under each achievement, the share of all players who have it (Steam's public numbers, fetched from Steam's Web API with just the game's app ID)
 - *Unlock shown* / *Lock shown* for whatever the search and filter currently show
 - changes are **staged** first; **Apply** asks for a confirmation, then writes them to your Steam account and waits for Steam to confirm the save
 
@@ -20,7 +21,7 @@ Grab `achievement-manager.star` from the [Releases](https://github.com/madmaxgre
 ## Notes
 
 > [!IMPORTANT]
-> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed. Steam Deck / SteamOS, immutable distributions are not supported.
+> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed.
 
 - It sits next to *View My Achievements* on the game page. If that button is not there, the plugin adds its own button to the achievements section instead.
 - Achievement names are shown in Steam's current language when the game's schema has it, English otherwise.

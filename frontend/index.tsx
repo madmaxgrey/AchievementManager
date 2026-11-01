@@ -1,18 +1,13 @@
 // @ts-nocheck
-/* Achievement Manager 1.12.1 — Starlight build. Steam's beta removed the tabs of the achievements window, so
- * the manager now opens from a button next to "View My Achievements" in its own Steam-styled window. */
+/* Achievement Manager 1.12.2. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
 import { definePlugin, Field } from 'millennium';
 
 const React = (window as any).SP_REACT;
 const API = (window as any).MILLENNIUM_API;
 
-/* Steam's per-game stats schema: appcache/stats/UserGameStatsSchema_<appid>.bin
- *
- * A binary KeyValues file. The backend sends it over as a hex string (it cannot put raw
- * bytes in JSON); this turns it into achievement definitions: API name, title,
- * description, icon names, hidden flag. Same layout SteamAchievementManager reads.
- * Pure functions, no Steam or DOM access — scripts/test-schema.mjs exercises them.
- */
+/* Reads Steam's per-game stats schema (appcache/stats/UserGameStatsSchema_<appid>.bin), a binary KeyValues file.
+ * The backend sends it as a hex string; this turns it into achievement definitions (API name, title, description,
+ * icons, hidden flag). Pure functions: no Steam or DOM access. */
 
 const KV_NONE = 0, KV_STRING = 1, KV_INT32 = 2, KV_FLOAT32 = 3, KV_PTR = 4, KV_WSTRING = 5,
   KV_COLOR = 6, KV_UINT64 = 7, KV_END = 8, KV_INT64 = 10, KV_END_ALT = 11;
@@ -175,18 +170,11 @@ function iconUrl(appId, icon) {
   return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
 }
 
-/* Achievement Manager — frontend (1.12.1).
+/* The button and the window.
  *
- * Steam's beta removed the tabs of the achievements window, so the manager now opens from its own button,
- * placed next to "View My Achievements" on a game's library page, and shows a window built to look like
- * Steam's own dialogs (the game's Properties window: a left navigation column, a content column, dialog
- * buttons at the bottom). Rows, toggles, the search box, the dropdown and the progress bar are Steam's own
- * controls; the layout around them is a small stylesheet.
- *
- * The button is made by copying the "View My Achievements" button (so it keeps Steam's own look) and
- * inserting the copy after it; a MutationObserver on the library window puts it back whenever Steam redraws
- * the page. The game is read from the React fiber of that button.
- */
+ * The button is a copy of Steam's "View My Achievements" button, so it keeps the theme's look, placed beside it. A
+ * MutationObserver puts it back whenever Steam redraws the page. The window is built from the same parts as Steam's game
+ * Properties window (navigation column, content column, dialog buttons), so themes style it like that window. */
 
 const TITLE = 'Achievement Manager';
 const h = React.createElement;
@@ -242,6 +230,17 @@ function steamLanguageNow() {
   return (navigator && navigator.language) || 'english';
 }
 
+// how many players have each achievement (Steam's public numbers): the backend hands over the Web API's answer as text
+function sharesFrom(res) {
+  const out = {};
+  try {
+    if (typeof res.percent_raw !== 'string') return out;
+    const list = JSON.parse(res.percent_raw).achievementpercentages.achievements;
+    (Array.isArray(list) ? list : []).forEach(a => { const p = a ? Number(a.percent) : NaN; if (a && a.name && isFinite(p)) out[a.name] = p; });
+  } catch (e) { console.warn('[Achievement Manager] global percentages unreadable', e); }
+  return out;
+}
+
 function rowsFrom(res, appId) {
   let defs = {};
   let broken = false;
@@ -252,6 +251,7 @@ function rowsFrom(res, appId) {
       defs = extractAchievements(tree, appId, steamLanguageNow());
     } catch (e) { console.warn('[Achievement Manager] schema unreadable', e); }
   }
+  const shares = sharesFrom(res);
   const rows = Object.keys(res.achievements || {}).map((name, order) => {
     const meta = defs[name];
     const state = res.achievements[name];
@@ -265,6 +265,7 @@ function rowsFrom(res, appId) {
       hidden: !!info.hidden,
       achieved: !!state.achieved,
       unlockTime: state.unlock_time || 0,
+      percent: Object.prototype.hasOwnProperty.call(shares, name) ? shares[name] : null,
     };
   });
   const missing = rows.filter(r => !r.known).length;
@@ -306,6 +307,7 @@ const CSS = `
 .amw-root .amw-rowtext{flex:1 1 auto;min-width:0}
 .amw-root .amw-rowtitle{font-size:14px;line-height:19px;font-weight:600;color:#fff;overflow-wrap:anywhere}
 .amw-root .amw-rowdesc{margin-top:2px;font-size:12px;line-height:16px;font-weight:400;color:rgba(255,255,255,.62);white-space:normal;overflow-wrap:anywhere}
+.amw-root .amw-rowpct{margin-top:1px;font-size:12px;line-height:16px;font-weight:400;color:rgba(255,255,255,.45);white-space:normal;overflow-wrap:anywhere}
 .amw-root .amw-rowtoggle{flex:none;display:flex;align-items:center;justify-content:flex-end;min-width:48px}
 .amw-root .amw-empty{padding:56px 0;text-align:center;opacity:.6}
 .amw-root .amw-more{display:flex;justify-content:center;padding:14px 0 6px}
@@ -496,7 +498,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
           onClick: () => { setFilter(key); setLimit(PAGE); },
         }, h('div', { className: 'amw-label _2PPbMrzl8PKBwpkjYs9b0i' }, label), phase === 'ready' ? h('div', { className: 'amw-count' }, String(count)) : null);
       })),
-    h('div', { className: 'amw-side-note' }, 'Changes are written to your real Steam account.'));
+    h('div', { className: 'amw-side-note' }, 'Changes are applied to your Steam account and can be reverted at any time.'));
 
   const frame = main => [
     h('div', { key: 'backdrop', className: 'amw-backdrop', style: { backgroundColor: look.backdropColor || undefined, backgroundImage: look.backdropImage || undefined } }),
@@ -546,7 +548,8 @@ function ManagerWindow({ appId, gameName, closeModal }) {
       row.icon ? h('img', { className: 'amw-rowicon', src: row.icon, alt: '', style: { opacity: now ? 1 : 0.55 } }) : null,
       h('div', { className: 'amw-rowtext' },
         h('div', { className: 'amw-rowtitle' }, row.title),
-        lines.length ? h('div', { className: 'amw-rowdesc' }, lines.join('  ·  ')) : null),
+        lines.length ? h('div', { className: 'amw-rowdesc' }, lines.join('  ·  ')) : null,
+        row.percent != null ? h('div', { className: 'amw-rowpct' }, `${row.percent.toFixed(1)}% of players have this achievement`) : null),
       h('div', { className: 'amw-rowtoggle' }, h(API.Toggle, { value: now, onChange: v => setWanted(row, v) })));
   };
 
@@ -641,9 +644,8 @@ const isShown = el => {
   try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && el.offsetParent !== null; } catch (e) { return false; }
 };
 
-/* The word for "achievement" in each of Steam's languages (stems, so plurals and cases match). Steam translates the button
- * ("View My Achievements"), so the English words cannot be relied on. Like the Easy Restart plugin, this goes by the language
- * Steam reports (SteamClient.Settings.GetCurrentLanguage) and looks the text up in a table per language. */
+/* The word for "achievement" in each of Steam's languages (stems, so plurals match). Steam translates the button, so
+ * English alone isn't enough; the table is picked by the language Steam reports (like the Easy Restart plugin does). */
 const ACHIEVEMENT_WORDS = {
   arabic: ['نجاز'], bulgarian: ['постижени', 'достижени'], schinese: ['成就'], tchinese: ['成就'],
   czech: ['úspěch', 'úspěš'], danish: ['bedrift', 'præstation'], dutch: ['prestatie'], finnish: ['saavutu'],
@@ -697,10 +699,9 @@ function shortButtons(doc) {
   return out;
 }
 
-// Where a copy may go, and where never. A button with similar words that is NOT Steam's own "View My Achievements" (a filter,
-// a collection's header, an entry of a drop-down or context menu, a dialog) must never get a copy, so a candidate has to sit in
-// the achievements section of a game's page, or belong to a game (the app id can be read from it); and anything inside a menu,
-// list, dialog or tooltip is out. Only the loose wording searches below insist on the section itself.
+// A copy may only go beside Steam's real "View My Achievements" button, never beside a filter, a collection header or a menu
+// entry. So a candidate must sit in the achievements section of a game's page (or belong to a game, which we can tell from its
+// React props), and nothing inside a menu, list, dialog or tooltip counts. The looser word searches require the section itself.
 const NOT_HERE = '[role="menu"],[role="menuitem"],[role="listbox"],[role="option"],[role="dialog"],[role="tooltip"],[class*="contextmenu" i],[class*="dropdown" i]';
 function gate(node, strict) {
   try {
@@ -710,10 +711,9 @@ function gate(node, strict) {
   } catch (e) { return false; }
 }
 
-// "View My Achievements", in the language Steam shows; a hidden one is skipped, because a copy of it would be hidden too
-// (some themes hide it and show the achievements somewhere else). Looked for in three steps: the English wording, then the
-// words of Steam's current language, then the words of every language (in case the language could not be read); the last
-// step only counts inside the achievements section.
+// Finds "View My Achievements" in Steam's language, skipping hidden ones (a copy of a hidden button would be hidden too).
+// Three passes: the English wording, then the words of Steam's current language, then the words of every language (in case
+// the language couldn't be read). The last pass only counts inside the achievements section.
 function findAnchor(doc) {
   const buttons = shortButtons(doc);
   // of several candidates the one inside the achievements section wins
@@ -730,8 +730,8 @@ function findAnchor(doc) {
   return null;
 }
 
-// last resort when no wording matched (a language missing from the table): a button that sits inside an element whose class
-// mentions achievements, on a page that is a game's (the game can be told from the button)
+// Last resort when no wording matched (a language missing from the table): a button inside an element whose class mentions
+// achievements, on a game's page.
 function findLooseAnchor(doc) {
   for (const b of shortButtons(doc)) {
     let area = false, el = b.node.parentElement;
@@ -825,13 +825,12 @@ function flash(btn, text) {
   setTimeout(() => { if (btn.getAttribute(BTN_ATTR)) btn.textContent = old === text ? TITLE : old; }, 3500);
 }
 
-// The copy is locked to the original: its place is worked out again from the original's own box whenever that box changes
-// (a size watcher, the page's redraws, and a quick check every quarter of a second), so it cannot drift, lag behind or stay
-// where the original used to be. Where it goes is decided each time, never remembered:
-//   'left'   beside the original, to its left, whatever the page's layout is (row, column, pinned to a corner);
-//   'below'  under the original, in the page's flow, only when there is no room on the left: it never lands on top of the
-//            original, never sticks out of a clipping parent, and goes back to the left as soon as there is room again;
-//   'inside' at the end of the achievements section (there is no usable button to sit beside).
+// The copy is pinned to the original: its position is recalculated from the original's box whenever that changes (a size
+// watcher, page redraws, and a check every 250 ms), so it can't drift or lag. The mode is decided fresh each time:
+//   'left'   beside the original, on its left;
+//   'below'  under the original, only when there is no room on the left (it never overlaps the original or sticks out of a
+//            clipping parent, and goes back to the left once there is room);
+//   'inside' at the end of the achievements section, when there is no usable button to sit beside.
 const GAP = 8, HYSTERESIS = 12;
 
 // would a button of this width, to the left of the original, be cut off by the window or by a parent that clips its content?
@@ -1014,8 +1013,8 @@ function dispose() {
 
 /* ═════════════ steam:// link ═════════════ */
 
-/* A Steam link of the plugin, like Extendium's steam://extendium/manager (it works in a browser's address bar and in Win + R):
- *   steam://achievementmanager/open/<appid>   the manager for that game, for when the button is missing */
+/* steam://achievementmanager/open/<appid> opens the manager for that game (like Extendium's steam://extendium/manager),
+ * for when the button is missing. */
 let lastUrl = '', lastUrlAt = 0, urlHandle = null;
 function handleSteamUrl(_, url) {
   const now = Date.now();
@@ -1183,6 +1182,10 @@ const CLASS_DOCS = [
         "about": "The description and the unlock date."
       },
       {
+        "selector": ".amw-rowpct",
+        "about": "The line under the description with the share of all players who have the achievement (Steam's public numbers). Left out when Steam has none for the game."
+      },
+      {
         "selector": ".amw-rowtoggle",
         "about": "Wrapper of the toggle (Steam's Toggle inside, which themes already style)."
       }
@@ -1271,8 +1274,8 @@ function cssSkeleton() {
   return lines.join('\n');
 }
 
-// Copy text to the clipboard. It runs in the window that was clicked (that is the one with the focus; the clipboard is refused
-// to a window that does not have it), tries the clipboard API first and the older copy command second.
+// Copies text to the clipboard from the window that was clicked (a window without focus is refused): the clipboard API first,
+// the old copy command second.
 function copyText(text, doc) {
   const d = doc || (typeof document !== 'undefined' ? document : null);
   if (!d) return Promise.reject(new Error('no document to copy from'));
@@ -1325,7 +1328,7 @@ const SETTINGS_CSS = `
 
 function SettingsPanel(props) {
   const [copied, setCopied] = React.useState('');
-  // The settings pane can be narrow (a small window, no theme). Below ~560px the buttons go under the text and the rows stack.
+  // The settings pane can be narrow: below about 560 px the buttons go under the text and the rows stack.
   const wrapRef = React.useRef(null);
   const [narrow, setNarrow] = React.useState(!!(props && props.forceNarrow));
   React.useEffect(() => {
