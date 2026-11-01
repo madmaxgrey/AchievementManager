@@ -1,20 +1,19 @@
-# Achievement Manager: the Steam helper for Linux.
+# Achievement Manager helper for Linux.
 #
-# The plugin's Lua backend runs this file with the system's python3 (Linux only; on Windows the plugin uses
-# steam_achievement_helper.cs instead). It talks to the running Steam client through steamclient.so, the same library
-# Steam's own games use, and reads or changes the signed-in user's achievements for one game. It never touches a game's
-# process. Only Python's standard library is used (ctypes), so nothing has to be installed.
+# The Lua backend runs this with the system's python3 (on Windows it uses steam_achievement_helper.cs instead). It talks to
+# the running Steam client through steamclient.so, the library Steam's own games use, and reads or changes the signed-in
+# user's achievements for one game. Standard library only (ctypes), so nothing has to be installed.
 #
 #   helper status <appid> --result-file <file> [--steam-path <folder>]
 #   helper sync   <appid> --result-file <file> [--steam-path <folder>] [--args-file <file>]
 #
-# The output is the same JSON the Windows helper of this version writes (the read-back and verified_from_server fields belong to 1.13):
+# Output is JSON, the same as the Windows helper:
 #   status  {"ok":true,"appid":N,"total":N,"achievements":{"API_NAME":{"achieved":bool,"unlock_time":N},...}}
-#   sync    entries "+API_NAME" (unlock), "-API_NAME" (lock) or a bare name (unlock), one per line in the args file;
-#           writes {"ok":bool,"appid":N,"unlocked_count":N,"locked_count":N,...}; ok is true only when Steam confirmed the save
+#   sync    the args file lists "+API_NAME" (unlock), "-API_NAME" (lock) or a bare name (unlock), one per line;
+#           result {"ok":bool,"appid":N,"unlocked_count":N,"locked_count":N,...}, ok only when Steam confirmed the save
 #   errors  {"ok":false,"error":"<code>"[,"detail":"<text>"]}
 #
-# Kept parseable by old interpreters (no f-strings, no annotations) so that the version check below can answer first.
+# No f-strings or annotations on purpose, so an old python can still parse the file and report "python_too_old".
 
 import sys
 
@@ -42,8 +41,7 @@ from ctypes import CFUNCTYPE, POINTER, byref, c_bool, c_char_p, c_int, c_uint32,
 
 
 # ---------------------------------------------------------------------------------------------- what Steam fixes
-# Names, positions and numbers below are dictated by Steam's own interfaces (ISteamClient, ISteamUserStats); any program
-# that talks to the client has to use exactly these. They are the same ones the Windows helper uses.
+# Names and positions below are fixed by Steam's interfaces (ISteamClient, ISteamUserStats); the Windows helper uses the same.
 CLIENT_INTERFACE = b"SteamClient020"
 STATS_INTERFACE = b"STEAMUSERSTATS_INTERFACE_VERSION012"
 

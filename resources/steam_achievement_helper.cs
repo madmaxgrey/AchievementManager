@@ -1,9 +1,7 @@
-// Steam achievement helper — talks to the running Steam client through steamclient64.dll
-// (ISteamUserStats), the same route SteamAchievementManager uses.
+// Steam achievement helper (Windows). Talks to the running Steam client through steamclient64.dll (ISteamUserStats),
+// the same route gibbed's SteamAchievementManager uses.
 //
-// Adapted from NativeGameLink for Steam (MIT, David Miranda), itself built on the approach of
-// gibbed/SteamAchievementManager. Copyright notice: see LICENSE. Written for the .NET Framework 4 compiler that ships with
-// Windows (csc.exe, C# 5): no string interpolation, no ?. operator.
+// Written for the .NET Framework 4 compiler that ships with Windows (csc.exe, C# 5): no string interpolation, no ?. operator.
 //
 //   status <appid>                    -> {"ok":true,"appid":N,"total":N,"achievements":{"API_NAME":{"achieved":b,"unlock_time":N},...}}
 //   sync   <appid> [+NAME] [-NAME]    -> unlock (+) / lock (-) achievements, then store
@@ -385,9 +383,8 @@ namespace SteamAchievementSync
 
                 if (command == "status")
                 {
-                    // Steam writes the game's stats schema (names, descriptions, icons) while it answers, a moment
-                    // after the callback. Wait until the file is there and has stopped growing, so the plugin reads
-                    // all of it — otherwise a game opened for the first time shows raw achievement IDs and no icons.
+                    // Steam writes the stats schema (names, descriptions, icons) a moment after the callback. Wait until the
+                    // file exists and stops growing, otherwise a game opened for the first time shows raw IDs and no icons.
                     string schemaPath = Path.Combine(Path.Combine(Path.Combine(steamPath, "appcache"), "stats"), "UserGameStatsSchema_" + appId + ".bin");
                     var schemaWait = DateTime.UtcNow;
                     long lastSize = -1;

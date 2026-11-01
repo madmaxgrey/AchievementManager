@@ -1,7 +1,7 @@
 local logger     = require("logger")
 local millennium = require("millennium")
 
--- defines the RPC functions (am_status / am_apply) the frontend calls through `backend`
+-- registers am_status / am_apply, the functions the frontend calls
 require("rpc_functions")
 
 local function on_load()
