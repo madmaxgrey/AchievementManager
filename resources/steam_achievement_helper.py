@@ -6,11 +6,17 @@
 #
 #   helper status <appid> --result-file <file> [--steam-path <folder>]
 #   helper sync   <appid> --result-file <file> [--steam-path <folder>] [--args-file <file>]
+#   helper stats    <appid> --result-file <file> --args-file <file>     read a game's stats
+#   helper setstats <appid> --result-file <file> --args-file <file>     write stats, store them, read them back
 #
 # Output is JSON, the same as the Windows helper:
 #   status  {"ok":true,"appid":N,"total":N,"achievements":{"API_NAME":{"achieved":bool,"unlock_time":N},...}}
 #   sync    the args file lists "+API_NAME" (unlock), "-API_NAME" (lock) or a bare name (unlock), one per line;
 #           result {"ok":bool,"appid":N,"unlocked_count":N,"locked_count":N,...}, ok only when Steam confirmed the save
+#   stats   the args file lists "i:NAME" (integer), "f:NAME" (float) or "a:NAME" (average rate, read only), one per line;
+#           result {"ok":true,"appid":N,"stats":{"NAME":{"kind":"i","value":N},...},"missing":["NAME",...]}
+#   setstats  lines are "i:NAME=123" / "f:NAME=1.5"; result {"ok":bool,"appid":N,"requested":N,"changed":N,
+#           "not_changed":[...],"stats":{...as Steam holds them after the save}}
 #   errors  {"ok":false,"error":"<code>"[,"detail":"<text>"]}
 #
 # No f-strings or annotations on purpose, so an old python can still parse the file and report "python_too_old".
@@ -37,7 +43,7 @@ import os
 import re
 import struct
 import time
-from ctypes import CFUNCTYPE, POINTER, byref, c_bool, c_char_p, c_int, c_uint32, c_void_p
+from ctypes import CFUNCTYPE, POINTER, byref, c_bool, c_char_p, c_float, c_int, c_uint32, c_void_p
 
 
 # ---------------------------------------------------------------------------------------------- what Steam fixes
@@ -48,6 +54,10 @@ STATS_INTERFACE = b"STEAMUSERSTATS_INTERFACE_VERSION012"
 # position of each method in the interface's table of functions
 CLIENT_CREATE_PIPE, CLIENT_RELEASE_PIPE, CLIENT_CONNECT_USER, CLIENT_RELEASE_USER, CLIENT_GET_STATS = 0, 1, 2, 4, 13
 STATS_REQUEST, STATS_SET, STATS_CLEAR, STATS_GET_TIME, STATS_STORE, STATS_COUNT, STATS_NAME = 0, 7, 8, 9, 10, 14, 15
+
+# The stat calls come in int / float pairs. This platform's compiler lays an overloaded pair out in declaration order, so the
+# int version of each pair comes first (on Windows the order is reversed; the helper also checks which slot is which).
+STATS_GET_INT, STATS_GET_FLOAT, STATS_SET_INT, STATS_SET_FLOAT = 1, 2, 3, 4
 
 CALLBACK_STATS_RECEIVED = 1101
 CALLBACK_STATS_STORED = 1102
@@ -141,6 +151,20 @@ def someone_is_signed_in():
 
 
 # ---------------------------------------------------------------------------------------------- the connection
+def shortest_float32(value):
+    """The shortest decimal that reads back as the same 32-bit float (0.1, not 0.10000000149011612); None for nan / infinity."""
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    for digits in range(1, 10):
+        text = "%.*g" % (digits, value)
+        try:
+            if struct.unpack("<f", struct.pack("<f", float(text)))[0] == value:
+                return float(text)
+        except (OverflowError, struct.error):
+            break
+    return value
+
+
 def _slot(iface, index, restype, *argtypes):
     """The function at position `index` of an interface's table of functions; `this` is always the first argument."""
     table = ctypes.cast(iface, POINTER(c_void_p))[0]
@@ -169,6 +193,10 @@ class SteamLink(object):
         self._set = None
         self._clear = None
         self._store = None
+        self._get_int = None
+        self._get_float = None
+        self._set_int = None
+        self._set_float = None
 
     @staticmethod
     def open(library_path, steam_folder):
@@ -201,7 +229,8 @@ class SteamLink(object):
         try:
             link._next_callback = module.Steam_BGetCallback
             link._next_callback.restype = c_bool
-            link._next_callback.argtypes = [c_int, POINTER(CallbackMsg)]
+            # Steam_BGetCallback(pipe, message, call): the third argument is an out-parameter that must be a real pointer
+            link._next_callback.argtypes = [c_int, POINTER(CallbackMsg), POINTER(c_int)]
             link._free_callback = module.Steam_FreeLastCallback
             link._free_callback.restype = None
             link._free_callback.argtypes = [c_int]
@@ -245,7 +274,46 @@ class SteamLink(object):
         link._set = _slot(link.stats, STATS_SET, c_bool, c_char_p)
         link._clear = _slot(link.stats, STATS_CLEAR, c_bool, c_char_p)
         link._store = _slot(link.stats, STATS_STORE, c_bool)
+        link.bind_stat_calls(False)
         return link, None
+
+    def bind_stat_calls(self, swapped):
+        order = (STATS_GET_FLOAT, STATS_GET_INT, STATS_SET_FLOAT, STATS_SET_INT) if swapped else (STATS_GET_INT, STATS_GET_FLOAT, STATS_SET_INT, STATS_SET_FLOAT)
+        self._get_int = _slot(self.stats, order[0], c_bool, c_char_p, POINTER(c_int))
+        self._get_float = _slot(self.stats, order[1], c_bool, c_char_p, POINTER(c_float))
+        self._set_int = _slot(self.stats, order[2], c_bool, c_char_p, c_int)
+        self._set_float = _slot(self.stats, order[3], c_bool, c_char_p, c_float)
+
+    def order_is_swapped(self, kind, name):
+        """Asks both getters about the same stat. Steam answers False to the one of the wrong type, so if only the other
+        one answers, the int / float slots are the other way round on this system."""
+        encoded = name.encode("utf-8")
+        as_int = c_int(0)
+        as_float = c_float(0)
+        ok_int = bool(self._get_int and self._get_int(self.stats, encoded, byref(as_int)))
+        ok_float = bool(self._get_float and self._get_float(self.stats, encoded, byref(as_float)))
+        if kind == "i":
+            return (not ok_int) and ok_float
+        return (not ok_float) and ok_int
+
+    def read_stat(self, kind, name):
+        """Returns (known, value); a float is the shortest decimal that reads back as the same 32-bit float."""
+        encoded = name.encode("utf-8")
+        if kind == "i":
+            value = c_int(0)
+            if self._get_int and self._get_int(self.stats, encoded, byref(value)):
+                return True, int(value.value)
+            return False, 0
+        value = c_float(0)
+        if self._get_float and self._get_float(self.stats, encoded, byref(value)):
+            return True, shortest_float32(value.value)
+        return False, 0
+
+    def write_stat(self, kind, name, number):
+        encoded = name.encode("utf-8")
+        if kind == "i":
+            return bool(self._set_int and self._set_int(self.stats, encoded, int(number)))
+        return bool(self._set_float and self._set_float(self.stats, encoded, float(number)))
 
     def close(self):
         try:
@@ -298,7 +366,8 @@ class SteamLink(object):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             message = CallbackMsg()
-            while self._next_callback(self.pipe, byref(message)):
+            call = c_int(0)
+            while self._next_callback(self.pipe, byref(message), byref(call)):
                 if message.id == callback_id and message.param:
                     game, code = struct.unpack("<Qi", ctypes.string_at(message.param, 12))
                     if game == app_id:
@@ -352,7 +421,7 @@ class Options(object):
             options.problem = "missing_arguments"
             return options
         options.command = words[0].lower()
-        if options.command not in ("status", "sync"):
+        if options.command not in ("status", "sync", "stats", "setstats"):
             options.problem = "unknown_command"
             return options
         if len(words) < 2 or not words[1].isdigit() or int(words[1]) == 0:
@@ -432,6 +501,109 @@ def report_sync(link, app_id, entries):
     Report.write(payload)
 
 
+def parse_stat_entry(raw, with_value):
+    """"i:NAME" (or "i:NAME=123" when a value is wanted) -> (kind, name, text), or None."""
+    if len(raw) < 3 or raw[1] != ":" or raw[0] not in "ifa":
+        return None
+    name = raw[2:]
+    text = None
+    if with_value:
+        cut = name.rfind("=")
+        if cut < 1:
+            return None
+        text = name[cut + 1:]
+        name = name[:cut]
+    if not name:
+        return None
+    return (raw[0], name, text)
+
+
+def detect_stat_order(link, entries):
+    """Checks the int / float slot order once, on the first stat Steam answers for."""
+    for kind, name, text in entries:
+        known_int, x = link.read_stat("i", name)
+        known_float, y = link.read_stat("f", name)
+        if known_int or known_float:
+            if link.order_is_swapped(kind, name):
+                link.bind_stat_calls(True)
+            return
+
+
+def read_all_stats(link, entries, missing):
+    stats = {}
+    for kind, name, text in entries:
+        known, value = link.read_stat(kind, name)
+        if not known:
+            missing.append(name)
+            continue
+        stats[name] = {"kind": kind, "value": value}
+    return stats
+
+
+def report_stats(link, app_id, entries):
+    detect_stat_order(link, entries)
+    missing = []
+    stats = read_all_stats(link, entries, missing)
+    Report.write({"ok": True, "appid": app_id, "stats": stats, "missing": missing})
+
+
+def stat_number(kind, text):
+    """The number a value text stands for, or None when it is not acceptable for this kind of stat."""
+    try:
+        if kind == "i":
+            number = int(text)
+            return number if -2147483648 <= number <= 2147483647 else None
+        number = float(text)
+        return number if number == number and abs(number) != float("inf") and abs(number) < 3.4e38 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def report_setstats(link, app_id, entries):
+    detect_stat_order(link, entries)
+    refused = []
+    wanted = []
+    for kind, name, text in entries:
+        number = None if kind == "a" else stat_number(kind, text)
+        if number is not None and link.write_stat(kind, name, number):
+            wanted.append((kind, name, number))
+        else:
+            refused.append(name)
+
+    stored = bool(wanted) and link.commit()
+    confirmed = False
+    if stored:
+        came, result = link.wait_for_callback(CALLBACK_STATS_STORED, app_id, 5)
+        confirmed = came and result == RESULT_OK
+
+    # ask Steam for the stats again, then compare what it now holds with what was asked for
+    from_server = False
+    if confirmed and link.request_stats():
+        came, result = link.wait_for_callback(CALLBACK_STATS_RECEIVED, app_id, 3)
+        from_server = came and result == RESULT_OK
+
+    changed = 0
+    for kind, name, number in wanted:
+        known, now = link.read_stat(kind, name)
+        if kind == "i":
+            same = known and now == number
+        else:
+            same = known and now is not None and abs(now - number) <= 0.0001 * max(1.0, abs(number))
+        if same:
+            changed += 1
+        else:
+            refused.append(name)
+
+    missing = []
+    after = read_all_stats(link, entries, missing)
+    committed = stored and confirmed
+    payload = {"ok": committed, "appid": app_id, "requested": len(entries), "changed": changed, "stored": stored,
+               "callback_confirmed": confirmed, "verified_from_server": from_server, "not_changed": refused, "stats": after}
+    if not committed:
+        payload["error"] = "store_stats_not_confirmed"
+    Report.write(payload)
+
+
 def main(argv):
     try:
         options = Options.parse(argv)
@@ -473,8 +645,17 @@ def main(argv):
             if options.command == "status":
                 wait_for_schema(steam_folder, options.app_id)
                 report_status(link, options.app_id)
-            else:
+            elif options.command == "sync":
                 report_sync(link, options.app_id, options.entries)
+            else:
+                entries = [e for e in (parse_stat_entry(w, options.command == "setstats") for w in options.entries) if e]
+                if not entries:
+                    Report.fail("nothing_to_apply")
+                    return
+                if options.command == "stats":
+                    report_stats(link, options.app_id, entries)
+                else:
+                    report_setstats(link, options.app_id, entries)
         finally:
             link.close()
     except Exception as error:
