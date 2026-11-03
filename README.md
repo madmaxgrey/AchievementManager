@@ -5,6 +5,7 @@ A [Millennium](https://steambrew.app) plugin that adds an **Achievement Manager*
 - every achievement of the game as a card: icon, name, description, unlock date, **toggle**
 - a navigation column that filters the list: **All achievements / Unlocked / Locked / Changed**, with counts; search and sort on top
 - under each achievement, the share of all players who have it (Steam's public numbers, fetched from Steam's Web API with just the game's app ID)
+- a **Stats** view for the game's numeric stats (kills, distance and the like): change a value and press Apply; Steam's own limits for each stat apply
 - *Unlock shown* / *Lock shown* for whatever the search and filter currently show
 - changes are **staged** first; **Apply** asks for a confirmation, then writes them to your Steam account and waits for Steam to confirm the save
 
@@ -61,7 +62,8 @@ millennium.toml                      manifest (plugin id, backend, frontend, res
 backend/main.lua                     load / unload hooks
 backend/rpc_functions.lua            am_status / am_apply, helper build + launch
 resources/steam_achievement_helper.cs   the Windows Steam client helper (bundled, compiled on first use)
-resources/steam_achievement_helper.py   the Linux Steam client helper (bundled, run with python3)
+resources/steam_stats_helper.cs         the Windows helper for stats (bundled, compiled on first use of the Stats view)
+resources/steam_achievement_helper.py   the Linux Steam client helper, achievements and stats (bundled, run with python3)
 frontend/index.tsx                   button injection, the manager window and the Steam stats schema reader
 ```
 

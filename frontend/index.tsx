@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.12.2. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
+/* Achievement Manager 1.13.0. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
 import { definePlugin, Field } from 'millennium';
 
 const React = (window as any).SP_REACT;
@@ -93,6 +93,11 @@ const intOf = (node, fallback) => {
   const n = parseInt(node.value, 10);
   return Number.isFinite(n) ? n : fallback;
 };
+const numOf = (node, fallback) => {
+  if (!node || node.value == null) return fallback;
+  const n = Number(node.value);
+  return Number.isFinite(n) ? n : fallback;
+};
 const boolOf = node => {
   if (!node || node.value == null) return false;
   const v = lower(node.value);
@@ -155,6 +160,8 @@ function extractAchievements(roots, appId, language) {
           icon: textOf(childOf(display, 'icon'), ''),
           iconGray: textOf(childOf(display, 'icon_gray'), ''),
           hidden: boolOf(childOf(display, 'hidden')),
+          permission: intOf(childOf(bit, 'permission'), 0),
+          bit: bit.name,
         };
       }
     }
@@ -179,6 +186,99 @@ function iconUrl(appId, icon) {
 const TITLE = 'Achievement Manager';
 const h = React.createElement;
 
+/* The "not allowed" symbol (a circle with a slash) shown next to protected achievements. Drawn in the text colour. */
+function ProtectedIcon() {
+  return h('svg', { className: 'amw-protecticon', width: 18, height: 18, viewBox: '0 0 24 24', 'aria-hidden': 'true', focusable: 'false' },
+    h('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: 'currentColor', strokeWidth: 2.6 }),
+    h('line', { x1: 5.8, y1: 5.8, x2: 18.2, y2: 18.2, stroke: 'currentColor', strokeWidth: 2.6, strokeLinecap: 'round' }));
+}
+
+/* A number box with minus and plus buttons. It is built from plain elements with our own class names, on purpose: Steam's
+ * TextField is restyled by themes (some put a search icon in every text field, some shrink it), which breaks a number box.
+ * The colours come from the text colour (currentColor), so any theme, light or dark, gets a matching border. */
+function Stepper({ def, text, current, known, bad, onChange }) {
+  const disabled = def.locked || !known;
+  const typed = String(text).trim();
+  const parsed = Number(typed);
+  const value = typed !== '' && Number.isFinite(parsed) ? parsed : (known ? current : 0);
+  const range = def.min != null && def.max != null ? def.max - def.min : Infinity;
+  const step = def.kind === 'i' ? 1 : (range <= 10 ? 0.1 : 1);
+  let lo = def.min != null ? def.min : null;
+  if (def.increment && known) lo = lo == null ? current : Math.max(lo, current);
+  const hi = def.max != null ? def.max : null;
+  const move = dir => {
+    let n = value + dir * step;
+    if (def.kind !== 'i') n = Math.round(n * 1e6) / 1e6;
+    if (lo != null && n < lo) n = lo;
+    if (hi != null && n > hi) n = hi;
+    onChange(String(n));
+  };
+  return h('div', { className: 'amw-spin' + (disabled ? ' amw-spin-off' : '') + (bad ? ' amw-spin-bad' : '') },
+    h('input', {
+      className: 'amw-spinfield', type: 'text', inputMode: def.kind === 'i' ? 'numeric' : 'decimal', spellCheck: false,
+      value: text, disabled,
+      onChange: e => onChange(e.target.value),
+      onKeyDown: e => {
+        if (e.key === 'ArrowUp') { e.preventDefault(); move(1); }
+        else if (e.key === 'ArrowDown') { e.preventDefault(); move(-1); }
+      },
+    }),
+    h('button', { type: 'button', className: 'amw-step', 'aria-label': 'Decrease', disabled: disabled || (lo != null && value <= lo), onClick: () => move(-1) }, '\u2212'),
+    h('button', { type: 'button', className: 'amw-step', 'aria-label': 'Increase', disabled: disabled || (hi != null && value >= hi), onClick: () => move(1) }, '+'));
+}
+
+/* Stats: the numeric counters a game keeps (kills, distance, ...), defined in the same schema file as the achievements.
+ * → [{ id, title, kind: 'i' | 'f' | 'a', min, max, increment, locked, reason }]; 'a' is an average-rate stat, which is
+ * shown but never written. A stat is locked when the schema protects it (permission bit 2), when only the game's server may
+ * set it, or when it is an average rate. */
+function extractStats(roots, appId, language) {
+  const languages = [steamLanguage(language), 'english'];
+  const app = roots.find(n => n.name === String(appId)) || roots[0];
+  const stats = childOf(app, 'stats');
+  const out = [];
+  if (!stats || !stats.children) return out;
+  for (const stat of stats.children) {
+    const typeNode = childOf(stat, 'type_int') || childOf(stat, 'type');
+    const type = intOf(typeNode, 0);
+    const typeText = lower(typeNode && typeNode.value);
+    const kind = (type === 1 || /^int(eger)?$/.test(typeText)) ? 'i'
+      : (type === 2 || typeText === 'float') ? 'f'
+      : (type === 3 || /^avg|^average/.test(typeText)) ? 'a' : '';
+    if (!kind) continue;
+    const id = textOf(childOf(stat, 'name'), '');
+    if (!id) continue;
+    const display = childOf(stat, 'display');
+    const protectedStat = (intOf(childOf(stat, 'permission'), 0) & 2) !== 0;
+    const serverOnly = boolOf(childOf(stat, 'bSetByTrustedGS'));
+    out.push({
+      id, kind,
+      title: localized(childOf(display, 'name'), languages, id),
+      min: numOf(childOf(stat, 'min'), null),
+      max: numOf(childOf(stat, 'max'), null),
+      increment: boolOf(childOf(stat, 'incrementonly')),
+      locked: protectedStat || serverOnly || kind === 'a',
+      reason: kind === 'a' ? 'Average-rate stats can\'t be edited' : protectedStat ? 'Protected by the game' : serverOnly ? 'Only the game\'s server can change this' : '',
+    });
+  }
+  return out;
+}
+
+/* Is the text typed for a stat acceptable? → { ok, value } or { ok: false, why } */
+function checkStat(def, text, current) {
+  const raw = String(text).trim();
+  if (raw === '') return { ok: false, why: 'Enter a number' };
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { ok: false, why: 'That is not a number' };
+  if (def.kind === 'i') {
+    if (!Number.isInteger(n)) return { ok: false, why: 'Whole numbers only' };
+    if (Math.abs(n) > 2147483647) return { ok: false, why: 'That number is too large' };
+  }
+  if (def.min != null && n < def.min) return { ok: false, why: 'At least ' + def.min };
+  if (def.max != null && n > def.max) return { ok: false, why: 'At most ' + def.max };
+  if (def.increment && current != null && n < current) return { ok: false, why: 'This stat can only go up from ' + current };
+  return { ok: true, value: n };
+}
+
 const FILTERS = [['All', 'All achievements'], ['Unlocked', 'Unlocked'], ['Locked', 'Locked'], ['Changed', 'Changed']];
 const SORTS = ['Steam order', 'Name', 'Unlocked first', 'Locked first', 'Recently unlocked'];
 const PAGE = 150;
@@ -189,7 +289,11 @@ const PAGE = 150;
 async function callBackend(method, payload) {
   // the compiler turns literal `backend.<name>(...)` calls into calls to the Lua functions, so each is written out
   const arg = JSON.stringify(payload);
-  const raw = method === 'am_apply' ? await backend.am_apply(arg) : await backend.am_status(arg);
+  let raw;
+  if (method === 'am_apply') raw = await backend.am_apply(arg);
+  else if (method === 'am_stats') raw = await backend.am_stats(arg);
+  else if (method === 'am_stats_apply') raw = await backend.am_stats_apply(arg);
+  else raw = await backend.am_status(arg);
   if (raw && typeof raw === 'object') return raw;
   try { return JSON.parse(String(raw)); } catch (e) { return { ok: false, error: 'bad_response' }; }
 }
@@ -213,6 +317,10 @@ const ERRORS = {
   busy: 'Another request is still running. Try again in a moment.',
   store_stats_not_confirmed: 'Steam did not confirm that the changes were saved.',
   invalid_appid: 'This game has no usable app ID.',
+  nothing_to_apply: 'There was nothing to write.',
+  stats_unavailable: 'Stats can only be edited on Windows and Linux.',
+  stats_compilation_failed: 'The stats helper program could not be built.',
+  stats_failed: 'The stats helper could not run.',
 };
 const explain = res => {
   const code = res && res.error;
@@ -223,6 +331,8 @@ const explain = res => {
 
 
 // Steam's logo, as a 24x24 SVG path (drawn in the loading screen)
+const PLUGIN_VERSION = '1.13.0';   // keep in step with millennium.toml; shown in diagnose() reports
+
 const STEAM_LOGO = 'M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z';
 
 function steamLanguageNow() {
@@ -243,12 +353,14 @@ function sharesFrom(res) {
 
 function rowsFrom(res, appId) {
   let defs = {};
+  let statDefs = [];
   let broken = false;
   if (res.schema_found && res.schema_hex) {
     try {
       const tree = parseBinaryKV(hexToBytes(res.schema_hex));
       broken = !!tree.broken;
       defs = extractAchievements(tree, appId, steamLanguageNow());
+      statDefs = extractStats(tree, appId, steamLanguageNow());
     } catch (e) { console.warn('[Achievement Manager] schema unreadable', e); }
   }
   const shares = sharesFrom(res);
@@ -263,6 +375,7 @@ function rowsFrom(res, appId) {
       description: info.description || '',
       icon: iconUrl(appId, state.achieved ? info.icon : (info.iconGray || info.icon)),
       hidden: !!info.hidden,
+      isProtected: (info.permission || 0) !== 0,   // the game sets this achievement itself; the schema says so with a non-zero permission
       achieved: !!state.achieved,
       unlockTime: state.unlock_time || 0,
       percent: Object.prototype.hasOwnProperty.call(shares, name) ? shares[name] : null,
@@ -271,7 +384,7 @@ function rowsFrom(res, appId) {
   const missing = rows.filter(r => !r.known).length;
   console.log(`[Achievement Manager] app ${appId}: schema ${res.schema_found ? (res.schema_bytes || '?') + ' bytes' + (broken ? ' (partly unreadable)' : '') : 'not found'}, ` +
     `${rows.length - missing} of ${rows.length} achievements described`);
-  return { rows, missing, schemaFound: !!res.schema_found, broken };
+  return { rows, missing, schemaFound: !!res.schema_found, broken, statDefs, platform: res.platform || '' };
 }
 
 // Steam writes the schema file a moment after it answers; for a game opened for the first time, ask once more
@@ -308,6 +421,19 @@ const CSS = `
 .amw-root .amw-rowtitle{font-size:14px;line-height:19px;font-weight:600;color:#fff;overflow-wrap:anywhere}
 .amw-root .amw-rowdesc{margin-top:2px;font-size:12px;line-height:16px;font-weight:400;color:rgba(255,255,255,.62);white-space:normal;overflow-wrap:anywhere}
 .amw-root .amw-rowpct{margin-top:1px;font-size:12px;line-height:16px;font-weight:400;color:rgba(255,255,255,.45);white-space:normal;overflow-wrap:anywhere}
+.amw-root .amw-statinput{flex:none;width:176px}
+.amw-root .amw-spin{display:flex;align-items:stretch;box-sizing:border-box;height:34px;overflow:hidden;border:1px solid color-mix(in srgb, currentColor 24%, transparent);border-radius:var(--amw-rowr,4px);background:color-mix(in srgb, currentColor 5%, transparent)}
+.amw-root .amw-spin:focus-within{border-color:color-mix(in srgb, currentColor 55%, transparent)}
+.amw-root .amw-spin-off{opacity:.5}
+.amw-root .amw-spin-bad{border-color:color-mix(in srgb, #e0605a 75%, transparent)}
+.amw-root .amw-spinfield{flex:1 1 auto;min-width:0;width:auto !important;height:auto !important;box-sizing:border-box;margin:0 !important;padding:0 10px !important;border:0 !important;border-radius:0 !important;outline:0 !important;box-shadow:none !important;transform:none !important;background:transparent !important;background-image:none !important;color:inherit !important;font:inherit;font-size:14px;text-align:left}
+.amw-root .amw-step{flex:none;display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:34px;margin:0 !important;padding:0 !important;border:0 !important;border-left:1px solid color-mix(in srgb, currentColor 24%, transparent) !important;border-radius:0 !important;box-shadow:none !important;transform:none !important;background:transparent !important;color:inherit !important;font-size:18px;line-height:1;font-weight:400;cursor:pointer}
+.amw-root .amw-step:hover:not(:disabled){background:color-mix(in srgb, currentColor 12%, transparent) !important}
+.amw-root .amw-step:disabled{opacity:.35;cursor:default}
+.amw-root .amw-statwhy{margin-top:2px;font-size:12px;line-height:16px}
+.amw-root .amw-navsep{height:1px;margin:6px 12px;background:rgba(255,255,255,.12)}
+.amw-root .amw-protecticon{flex:none;margin-right:10px;opacity:.75}
+.amw-root .amw-protected .amw-protecticon{cursor:help}
 .amw-root .amw-rowtoggle{flex:none;display:flex;align-items:center;justify-content:flex-end;min-width:48px}
 .amw-root .amw-empty{padding:56px 0;text-align:center;opacity:.6}
 .amw-root .amw-more{display:flex;justify-content:center;padding:14px 0 6px}
@@ -350,6 +476,15 @@ function ManagerWindow({ appId, gameName, closeModal }) {
   const alive = React.useRef(true);
   const confirmTimer = React.useRef(0);
   const retried = React.useRef(false);
+  const [view, setView] = React.useState('achievements');       // achievements | stats
+  const [platform, setPlatform] = React.useState('');
+  const [statDefs, setStatDefs] = React.useState([]);
+  const [statValues, setStatValues] = React.useState({});       // stat id -> current number, for the stats Steam reports
+  const [statEdits, setStatEdits] = React.useState({});         // stat id -> text typed, only where it differs
+  const [statsPhase, setStatsPhase] = React.useState('idle');   // idle | loading | ready | error
+  const [statsProblem, setStatsProblem] = React.useState('');
+  const [statSearch, setStatSearch] = React.useState('');
+  const [statConfirming, setStatConfirming] = React.useState(false);
 
   React.useEffect(() => { alive.current = true; return () => { alive.current = false; clearTimeout(confirmTimer.current); }; }, []);
 
@@ -403,6 +538,8 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     setRows(built.rows);
     setCoverage({ missing: built.missing, schemaFound: built.schemaFound, broken: built.broken });
     setEdits({}); setConfirming(false); setLimit(PAGE);
+    setStatDefs(built.statDefs); setPlatform(built.platform);
+    setStatValues({}); setStatEdits({}); setStatConfirming(false); setStatsPhase('idle');
     setPhase('ready');
   }, [appId, ask]);
 
@@ -412,6 +549,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
   const wanted = row => (has(row.name) ? edits[row.name] : row.achieved);
 
   const setWanted = (row, value) => {
+    if (row.isProtected) return;
     setConfirming(false); setNotice(null);
     setEdits(prev => {
       const next = { ...prev };
@@ -423,7 +561,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     setConfirming(false); setNotice(null);
     setEdits(prev => {
       const next = { ...prev };
-      for (const row of list) { if (value === row.achieved) delete next[row.name]; else next[row.name] = value; }
+      for (const row of list.filter(r => !r.isProtected)) { if (value === row.achieved) delete next[row.name]; else next[row.name] = value; }
       return next;
     });
   };
@@ -477,6 +615,66 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     }
   };
 
+  /* ───── stats ───── */
+
+  const loadStats = React.useCallback(async () => {
+    setStatsPhase('loading'); setStatsProblem('');
+    let res;
+    try { res = await callBackend('am_stats', { steam_app_id: String(appId), stats: statDefs.map(d => ({ kind: d.kind, name: d.id })) }); }
+    catch (e) { res = { ok: false, error: 'backend_unreachable', detail: String((e && e.message) || e) }; }
+    if (!alive.current) return;
+    if (!res || !res.ok) { setStatsProblem(explain(res)); setStatsPhase('error'); return; }
+    const values = {};
+    Object.keys(res.stats || {}).forEach(id => { const raw = res.stats[id] && res.stats[id].value; const v = raw == null ? NaN : Number(raw); if (Number.isFinite(v)) values[id] = v; });
+    setStatValues(values); setStatEdits({}); setStatsPhase('ready');
+  }, [appId, statDefs]);
+
+  React.useEffect(() => {
+    if (view === 'stats' && statsPhase === 'idle' && statDefs.length > 0) loadStats();
+  }, [view, statsPhase, statDefs, loadStats]);
+
+  const statById = React.useMemo(() => { const m = {}; statDefs.forEach(d => { m[d.id] = d; }); return m; }, [statDefs]);
+  const hasStat = id => Object.prototype.hasOwnProperty.call(statValues, id);
+  const setStatText = (def, text) => {
+    setStatConfirming(false); setNotice(null);
+    setStatEdits(prev => {
+      const next = { ...prev };
+      if (hasStat(def.id) && String(text) === String(statValues[def.id])) delete next[def.id]; else next[def.id] = text;
+      return next;
+    });
+  };
+  // the edits that can be written (valid, and different from what Steam holds), and how many typed values are not acceptable
+  const statChecks = Object.keys(statEdits).map(id => ({ def: statById[id], result: statById[id] ? checkStat(statById[id], statEdits[id], hasStat(id) ? statValues[id] : null) : { ok: false } }));
+  const statWrites = statChecks.filter(c => c.def && c.result.ok && c.result.value !== statValues[c.def.id]);
+  const statInvalid = statChecks.filter(c => !c.result.ok).length;
+
+  const applyStats = async () => {
+    if (!statConfirming) {
+      setStatConfirming(true);
+      clearTimeout(confirmTimer.current);
+      confirmTimer.current = setTimeout(() => { if (alive.current) setStatConfirming(false); }, 6000);
+      return;
+    }
+    setStatConfirming(false);
+    setWorking(true);
+    setNotice(null);
+    let res;
+    try { res = await callBackend('am_stats_apply', { steam_app_id: String(appId), set: statWrites.map(c => ({ kind: c.def.kind, name: c.def.id, value: c.result.value })) }); }
+    catch (e) { res = { ok: false, error: 'backend_unreachable', detail: String((e && e.message) || e) }; }
+    if (!alive.current) return;
+    setWorking(false);
+    if (res && res.stats) {                          // what Steam holds now, whether or not everything was accepted
+      const values = { ...statValues };
+      Object.keys(res.stats).forEach(id => { const raw = res.stats[id] && res.stats[id].value; const v = raw == null ? NaN : Number(raw); if (Number.isFinite(v)) values[id] = v; });
+      setStatValues(values); setStatEdits({});
+    }
+    if (res && res.ok) {
+      const refused = Array.isArray(res.not_changed) ? res.not_changed : [];
+      setNotice({ ok: refused.length === 0, text: `Saved ${res.changed || 0} of ${res.requested || 0} stat${res.requested === 1 ? '' : 's'}.` +
+        (refused.length ? ` Steam did not change ${refused.length}: ${refused.slice(0, 3).join(', ')}${refused.length > 3 ? '…' : ''}.` : '') });
+    } else setNotice({ ok: false, text: explain(res) });
+  };
+
   /* ───── pieces ───── */
 
   // Steam's dialog buttons; a plain Button stands in on a Millennium that does not offer them
@@ -484,10 +682,18 @@ function ManagerWindow({ appId, gameName, closeModal }) {
   const DPrimary = API.DialogButtonPrimary || API.DialogButton || API.Button;
 
   // Steam's own class names for the parts of its Properties window (see the comment at CSS); ours are added next to them
+  const statsAvailable = (platform === 'windows' || platform === 'linux') && statDefs.length > 0;
+  const viewItem = (key, label, count) => h('div', {
+    key: 'view-' + key, role: 'button',
+    className: 'amw-nav-item _1-vlriAtKYDViAEunue4VO Focusable' + (view === key ? ' amw-on _2DpXjzK3WWsOtUWUrcuOG7' : ''),
+    onClick: () => { setView(key); setConfirming(false); setStatConfirming(false); setNotice(null); },
+  }, h('div', { className: 'amw-label _2PPbMrzl8PKBwpkjYs9b0i' }, label), phase === 'ready' ? h('div', { className: 'amw-count' }, String(count)) : null);
+
   const sideColumn = h('div', { className: 'amw-side PageListColumn Panel _2kwFFHckg8jvnwJfg9-la8' },
     h('div', { className: 'amw-game _2rjVTGz8aLvqOdz5v2gq5C' }, gameName || 'Achievements'),
     h('div', { className: 'amw-nav _18QCu-7MTzd51UpVbYysDy' },
-      FILTERS.map(([key, label]) => {
+      statsAvailable ? [viewItem('achievements', 'Achievements', rows.length), viewItem('stats', 'Stats', statDefs.length), h('div', { key: 'navsep', className: 'amw-navsep' })] : null,
+      (view === 'achievements' || !statsAvailable) ? FILTERS.map(([key, label]) => {
         const count = key === 'All' ? rows.length
           : key === 'Unlocked' ? unlockedNow
           : key === 'Locked' ? rows.length - unlockedNow
@@ -497,7 +703,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
           className: 'amw-nav-item _1-vlriAtKYDViAEunue4VO Focusable' + (filter === key ? ' amw-on _2DpXjzK3WWsOtUWUrcuOG7' : ''),
           onClick: () => { setFilter(key); setLimit(PAGE); },
         }, h('div', { className: 'amw-label _2PPbMrzl8PKBwpkjYs9b0i' }, label), phase === 'ready' ? h('div', { className: 'amw-count' }, String(count)) : null);
-      })),
+      }) : null),
     h('div', { className: 'amw-side-note' }, 'Changes are applied to your Steam account and can be reverted at any time.'));
 
   const frame = main => [
@@ -531,6 +737,60 @@ function ManagerWindow({ appId, gameName, closeModal }) {
       h(DButton, { onClick: load }, 'Try again')));
   }
 
+  if (view === 'stats' && statsAvailable) {
+    if (statsPhase !== 'ready') {
+      if (statsPhase === 'error') {
+        return frame(h('div', { className: 'amw-center' },
+          h('div', { className: 'amw-title' }, 'Stats'),
+          h('div', { className: 'amw-msg' }, statsProblem),
+          h(DButton, { onClick: () => setStatsPhase('idle') }, 'Try again')));
+      }
+      return frame(h('div', { className: 'amw-center' }, h('div', { className: 'amw-msg' }, 'Reading stats from Steam...')));
+    }
+    const needle = statSearch.trim().toLowerCase();
+    const listed = statDefs.filter(d => !needle || d.title.toLowerCase().includes(needle) || d.id.toLowerCase().includes(needle));
+    const statRow = def => {
+      const known = hasStat(def.id);
+      const edited = Object.prototype.hasOwnProperty.call(statEdits, def.id);
+      const text = edited ? statEdits[def.id] : (known ? String(statValues[def.id]) : '');
+      const check = edited ? checkStat(def, text, known ? statValues[def.id] : null) : null;
+      const meta = [def.kind === 'i' ? 'Whole number' : def.kind === 'f' ? 'Decimal number' : 'Average rate'];
+      if (def.title !== def.id) meta.push(def.id);
+      if (def.min != null && def.min > -1e9) meta.push('min ' + def.min);
+      if (def.max != null && def.max < 1e9) meta.push('max ' + def.max);
+      if (def.increment) meta.push('can only go up');
+      if (def.locked) meta.push(def.reason);
+      if (!known) meta.push('Steam does not report this stat');
+      return h('div', { key: def.id, className: 'amw-row amw-statrow' + (edited ? ' amw-row-changed' : '') },
+        h('div', { className: 'amw-rowtext' },
+          h('div', { className: 'amw-rowtitle' }, def.title),
+          h('div', { className: 'amw-rowdesc' }, meta.join('  ·  ')),
+          check && !check.ok ? h('div', { className: 'amw-statwhy amw-bad' }, check.why) : null),
+        h('div', { className: 'amw-statinput' },
+          h(Stepper, { def, text, current: known ? statValues[def.id] : null, known, bad: !!(check && !check.ok), onChange: t => setStatText(def, t) })));
+    };
+    let statStatus = { cls: '', text: Object.keys(statEdits).length ? `${Object.keys(statEdits).length} change${Object.keys(statEdits).length === 1 ? '' : 's'} not saved yet` : '' };
+    if (statConfirming) statStatus = { cls: 'amw-warn', text: `Write ${statWrites.length} stat${statWrites.length === 1 ? '' : 's'}? Press Confirm to save to your Steam account.` };
+    else if (working) statStatus = { cls: '', text: 'Saving to your Steam account...' };
+    else if (notice) statStatus = { cls: notice.ok ? 'amw-ok' : 'amw-bad', text: notice.text };
+    else if (statInvalid) statStatus = { cls: 'amw-warn', text: `${statInvalid} value${statInvalid === 1 ? ' is' : 's are'} not acceptable and will be skipped.` };
+    return frame([
+      h('div', { key: 'head', className: 'amw-head' },
+        h('div', { className: 'amw-title' }, 'Stats'),
+        h('div', { className: 'amw-sub' }, `${statDefs.length} stat${statDefs.length === 1 ? '' : 's'}. A game may overwrite an edited stat, and Steam applies its own limits.`)),
+      h('div', { key: 'tools', className: 'amw-tools' },
+        h('div', { className: 'amw-search' },
+          h(API.TextField, { value: statSearch, placeholder: 'Search stats...', onChange: e => setStatSearch(e.target.value) }))),
+      h('div', { key: 'list', className: 'amw-list DialogBody' },
+        listed.length === 0 ? h('div', { className: 'amw-empty' }, 'No stat matches the search.') : listed.map(statRow)),
+      h('div', { key: 'foot', className: 'amw-foot' },
+        h('div', { className: 'amw-status ' + statStatus.cls }, statStatus.text),
+        h('div', { className: 'amw-actions' },
+          h(DButton, { onClick: () => { setStatEdits({}); setStatConfirming(false); setNotice(null); }, disabled: working || Object.keys(statEdits).length === 0 }, 'Revert'),
+          h(DPrimary, { className: 'amw-primary', onClick: applyStats, disabled: working || statWrites.length === 0 }, statConfirming ? 'Confirm' : 'Apply'))),
+    ]);
+  }
+
   const percent = rows.length ? Math.round((unlockedNow / rows.length) * 1000) / 10 : 0;
   const shown = visible.slice(0, limit);
   const fmtDate = t => (t ? new Date(t * 1000).toLocaleString() : '');
@@ -550,7 +810,9 @@ function ManagerWindow({ appId, gameName, closeModal }) {
         h('div', { className: 'amw-rowtitle' }, row.title),
         lines.length ? h('div', { className: 'amw-rowdesc' }, lines.join('  ·  ')) : null,
         row.percent != null ? h('div', { className: 'amw-rowpct' }, `${row.percent.toFixed(1)}% of players have this achievement`) : null),
-      h('div', { className: 'amw-rowtoggle' }, h(API.Toggle, { value: now, onChange: v => setWanted(row, v) })));
+      h('div', { className: 'amw-rowtoggle' + (row.isProtected ? ' amw-protected' : ''), title: row.isProtected ? 'This achievement is protected.' : undefined },
+        row.isProtected ? h(ProtectedIcon) : null,
+        h(API.Toggle, { value: now, disabled: !!row.isProtected, onChange: v => setWanted(row, v) })));
   };
 
   // one line at the bottom: the question while confirming, otherwise the last result or the number of changes
@@ -744,6 +1006,101 @@ function findLooseAnchor(doc) {
     if (info) { noteTier('a button in the achievements area'); return b.node; }
   }
   return null;
+}
+
+// Why is an achievement not unlocking? Console helper (Steam's shared JS context):
+//   copy((await __achievementManager.diagnose(863550)).join('\n'))                  a report for the game
+//   copy((await __achievementManager.diagnose(863550, 'Title or ACH_NAME')).join('\n'))   plus a verdict for one or more achievements (title or API name)
+// Read-only. It runs the status helper once (Steam may show you as in-game for a moment) and compares what the game's schema,
+// Steam's own list for your account and Steam's public numbers say. Returns the report as an array of lines.
+async function diagnose(appId, names) {
+  const out = [];
+  const say = t => out.push(String(t));
+  const when = sec => (sec ? new Date(sec * 1000).toLocaleString() : '');
+  const list = (title, items) => { if (items.length) say(`${title} (${items.length}): ${items.slice(0, 25).join(', ')}${items.length > 25 ? ', ...' : ''}`); };
+  try {
+    const match = String(appId == null ? '' : appId).match(/\d+/);
+    const id = match ? match[0] : '';
+    say('Achievement Manager diagnostics, plugin ' + PLUGIN_VERSION);
+    say('time: ' + new Date().toISOString());
+    say('steam language: ' + steamUiLanguage + ' | ' + String(navigator.userAgent || '').slice(0, 140));
+    if (!id) { say('No app id given. Use diagnose(<appid>).'); return out; }
+    let gameName = '';
+    try {                                   // the game's name, when Steam's UI can tell it (helps to spot a wrong app id)
+      const overview = window.appStore && window.appStore.GetAppOverviewByAppID && window.appStore.GetAppOverviewByAppID(Number(id));
+      gameName = (overview && (overview.display_name || overview.name)) || '';
+    } catch (e) { gameName = ''; }
+    say('app: ' + id + (gameName ? ' (' + gameName + ')' : ''));
+
+    let res;
+    try { res = await callBackend('am_status', { steam_app_id: id }); }
+    catch (e) { res = { ok: false, error: 'backend_unreachable', detail: String((e && e.message) || e) }; }
+    if (!res || !res.ok) {
+      say('STATUS FAILED: ' + ((res && res.error) || 'no answer') + (res && res.detail ? ' [' + res.detail + ']' : ''));
+      say('meaning: ' + explain(res));
+      return out;
+    }
+    const steamNames = Object.keys(res.achievements || {});
+    const achieved = steamNames.filter(n => res.achievements[n].achieved);
+    say(`helper: ok on ${res.platform || 'unknown system'}. Steam lists ${steamNames.length} achievements for this account: ${achieved.length} unlocked, ${steamNames.length - achieved.length} locked`);
+
+    let defs = {};
+    let tree = null;
+    if (res.schema_found && res.schema_hex) {
+      try { tree = parseBinaryKV(hexToBytes(res.schema_hex)); defs = extractAchievements(tree, id, steamLanguageNow()); } catch (e) { say('schema could not be read: ' + ((e && e.message) || e)); }
+    }
+    const defNames = Object.keys(defs);
+    say(`schema: ${res.schema_found ? (res.schema_bytes || '?') + ' bytes' + (tree && tree.broken ? ' (partly unreadable)' : '') : 'NOT FOUND'}, ${defNames.length} achievements defined`);
+    const shares = sharesFrom(res);
+    say(`global percentages: ${Object.keys(shares).length ? Object.keys(shares).length + ' known' : 'not available (offline, or Steam has none for this game)'}`);
+
+    const schemaOnly = defNames.filter(n => !res.achievements[n]);
+    const unknownToSchema = steamNames.filter(n => !defs[n]);
+    const protectedLocked = steamNames.filter(n => defs[n] && defs[n].permission !== 0 && !res.achievements[n].achieved);
+    list('in the schema but not listed by Steam for this account, so they cannot be unlocked from here (DLC not owned, archived, or another game version)', schemaOnly);
+    list('listed by Steam but missing from the schema (shown without a title)', unknownToSchema);
+    list('locked, with a non-zero permission in the schema (the game sets these itself; Steam usually refuses them from a client)', protectedLocked);
+
+    const wanted = (names == null ? [] : (Array.isArray(names) ? names : [names])).map(String);
+    const allNames = Array.from(new Set(steamNames.concat(defNames)));
+    const titleOf = n => String((defs[n] && defs[n].title) || '').toLowerCase();
+    for (const asked of wanted) {
+      const q = asked.toLowerCase();
+      // an API name (exact, then ignoring case), otherwise the title shown in Steam
+      let found = allNames.filter(n => n === asked);
+      let how = '';
+      if (!found.length) { found = allNames.filter(n => n.toLowerCase() === q); how = ' (matched the API name ignoring case)'; }
+      if (!found.length) { found = allNames.filter(n => titleOf(n) === q); how = ' (matched by title)'; }
+      if (!found.length) { found = allNames.filter(n => titleOf(n).includes(q)); how = ' (matched part of the title)'; }
+      if (!found.length) {
+        const near = allNames.filter(n => n.toLowerCase().includes(q)).slice(0, 5);
+        say('');
+        say(`[${asked}] not found: no achievement has that API name or title in the schema or in Steam's list${near.length ? '; similar names: ' + near.join(', ') : ''}. Check that this is the right game (${id}${gameName ? ', ' + gameName : ''}).`);
+        continue;
+      }
+      for (const name of found.slice(0, 5)) {
+        const d = defs[name], st = res.achievements[name];
+        say('');
+        say(`[${name}]${how} ${d ? 'title "' + d.title + '"' : 'no title in the schema'}${d && d.hidden ? ', hidden' : ''}`);
+        say(`  in the schema: ${d ? 'yes (bit ' + d.bit + ', permission ' + d.permission + (d.permission !== 0 ? ', protected' : '') + ')' : 'no'}`);
+        say(`  listed by Steam for this account: ${st ? 'yes' : 'NO'}`);
+        if (st) say(`  state: ${st.achieved ? 'unlocked' + (st.unlock_time ? ' on ' + when(st.unlock_time) : '') : 'locked'}`);
+        say(`  share of players: ${Object.prototype.hasOwnProperty.call(shares, name) ? shares[name].toFixed(1) + '%' : 'unknown'}`);
+        let verdict;
+        if (!st) verdict = 'Steam does not list this achievement for your account, so an unlock request is ignored. Usually DLC you do not own, an archived achievement, or a different version of the game.';
+        else if (st.achieved) verdict = 'Already unlocked on your account. If Steam\'s page still shows it locked, refresh the Steam UI.';
+        else if (d && d.permission !== 0) verdict = 'Protected: the schema marks it with permission ' + d.permission + ', meaning the game itself sets this achievement. Steam usually refuses it from a client, and the window locks its toggle.';
+        else verdict = 'Nothing visible prevents it. Unlock it in the window and press Apply; if it stays locked the window names it under "Steam did not change", which means Steam refused it.';
+        say('  verdict: ' + verdict);
+      }
+      if (found.length > 5) say(`  (${found.length - 5} more matches not shown; use the API name)`);
+    }
+    say('');
+    say('end of report');
+  } catch (e) {
+    say('diagnose failed: ' + ((e && e.stack) || e));
+  }
+  return out;
 }
 
 // for bug reports: what Steam's language is and which buttons the page has (__achievementManager.buttons())
@@ -1187,7 +1544,11 @@ const CLASS_DOCS = [
       },
       {
         "selector": ".amw-rowtoggle",
-        "about": "Wrapper of the toggle (Steam's Toggle inside, which themes already style)."
+        "about": "Wrapper of the toggle (Steam's Toggle inside, which themes already style). Gets .amw-protected on a protected achievement."
+      },
+      {
+        "selector": ".amw-protecticon",
+        "about": "The not-allowed symbol next to the toggle of a protected achievement (the game sets it itself, so the toggle is disabled). Its tooltip reads \"This achievement is protected.\" It is drawn in the text colour."
       }
     ]
   },
@@ -1242,6 +1603,40 @@ const CLASS_DOCS = [
       {
         "selector": "[data-amw-mode=\"inside\"]",
         "about": "Added at the end of the achievements section (when there is no usable View My Achievements button)."
+      }
+    ]
+  },
+  {
+    "group": "Stats view",
+    "blurb": "Windows and Linux; shown when the game has stats",
+    "items": [
+      {
+        "selector": ".amw-navsep",
+        "about": "The thin line under the Achievements / Stats switch in the navigation column."
+      },
+      {
+        "selector": ".amw-statrow",
+        "about": "One stat (a card, also .amw-row). Gets .amw-row-changed while an edit is staged."
+      },
+      {
+        "selector": ".amw-statinput",
+        "about": "The box on the right of a stat card that holds the number box."
+      },
+      {
+        "selector": ".amw-spin",
+        "about": "The number box: one bordered group with the value field and the minus and plus buttons. Also gets .amw-spin-off (locked) or .amw-spin-bad (value not acceptable). Its colours come from the text colour, so it follows any theme."
+      },
+      {
+        "selector": ".amw-spinfield",
+        "about": "The value field inside the number box. A plain input, not Steam's text field, so themes that decorate Steam's text fields do not touch it."
+      },
+      {
+        "selector": ".amw-step",
+        "about": "The minus and plus buttons of the number box (plain buttons)."
+      },
+      {
+        "selector": ".amw-statwhy",
+        "about": "The line under a stat that says why the typed value is not acceptable (also .amw-bad)."
       }
     ]
   },
@@ -1414,6 +1809,8 @@ async function main() {
     classes: () => CLASS_DOCS,
     // Steam's language and the buttons of the library page, for bug reports when the button does not show: __achievementManager.buttons()
     buttons: describeButtons,
+    // a report for "why is this achievement not unlocking": copy((await __achievementManager.diagnose(appId, 'ACH_NAME')).join('\n'))
+    diagnose,
     // what the window found in its own page (for bug reports): are Steam's Properties-window classes styled, and the theme accent
     look: () => { const el = document.querySelector('.amw-root'); return el ? { classes: el.className, fallback: el.classList.contains('amw-fallback') } : null; },
   };

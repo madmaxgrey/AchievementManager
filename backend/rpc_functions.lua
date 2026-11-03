@@ -180,18 +180,21 @@ local function find_csc()
 end
 
 -- Compiles the helper once. The exe name contains a hash of the source, so an updated helper never runs as an old exe.
-local function helper_exe()
-    local ok, source = pcall(function() return millennium.assets.read("resources/steam_achievement_helper.cs") end)
+local function helper_exe(resource, prefix, failcode)
+    resource = resource or "resources/steam_achievement_helper.cs"
+    prefix = prefix or "achievement_manager_helper_"
+    failcode = failcode or "compilation_failed"
+    local ok, source = pcall(function() return millennium.assets.read(resource) end)
     if not ok or type(source) ~= "string" or source == "" then return nil, "helper_source_missing" end
 
     local hash = 5381
     for i = 1, #source do hash = (hash * 33 + source:byte(i)) % 4294967296 end
-    local exe = fs.join(temp_dir(), string.format("achievement_manager_helper_%08x.exe", hash))
+    local exe = fs.join(temp_dir(), string.format("%s%08x.exe", prefix, hash))
     if fs.exists(exe) then return exe end
 
-    local cs_path = fs.join(temp_dir(), string.format("achievement_manager_helper_%08x.cs", hash))
+    local cs_path = fs.join(temp_dir(), string.format("%s%08x.cs", prefix, hash))
     local f = io.open(cs_path, "wb")
-    if not f then return nil, "compilation_failed" end
+    if not f then return nil, failcode end
     f:write(source)
     f:close()
 
@@ -200,7 +203,7 @@ local function helper_exe()
     run_silent(string.format('"%s" /nologo /target:winexe /out:"%s" "%s"', csc, exe, cs_path), 60000)
     pcall(os.remove, cs_path)
     if fs.exists(exe) then return exe end
-    return nil, "compilation_failed"
+    return nil, failcode
 end
 
 local function steam_path()
@@ -330,7 +333,13 @@ local function run_helper(arguments, arg_lines)
         return nil, "unsupported_platform", tostring(jit and jit.os or "unknown")
     end
 
-    local exe, why = helper_exe()
+    -- the stats helper is a separate program, built only when stats are asked for, so a problem with it never touches achievements
+    local exe, why
+    if arguments:match("^stats") or arguments:match("^setstats") then
+        exe, why = helper_exe("resources/steam_stats_helper.cs", "achievement_manager_stats_", "stats_compilation_failed")
+    else
+        exe, why = helper_exe()
+    end
     if not exe then return nil, why end
 
     sequence = (sequence + 1) % 1000000
@@ -362,7 +371,7 @@ local function run_helper(arguments, arg_lines)
     return output
 end
 
--- Turns whatever the frontend sent (an app id, a JSON string, or a table) into { steam_app_id, unlock, lock }.
+-- Turns whatever the frontend sent (an app id, a JSON string, or a table) into { steam_app_id, unlock, lock, stats, set }.
 local function parse_request(request)
     if type(request) == "string" then
         local trimmed = request:match("^%s*(.-)%s*$") or ""
@@ -377,6 +386,8 @@ local function parse_request(request)
             steam_app_id = raw_id and tostring(raw_id):match("%d+") or nil,
             unlock = request.unlock,
             lock = request.lock,
+            stats = request.stats,
+            set = request.set,
         }
     end
     return {}
@@ -494,6 +505,71 @@ function am_apply(request)
         if not decoded_ok or type(decoded) ~= "table" then return fail("json_parse_failed", raw:sub(1, 200)) end
         logger:info(string.format("Achievement Manager: app %s, +%s -%s, ok=%s", id,
             tostring(decoded.unlocked_count), tostring(decoded.locked_count), tostring(decoded.ok)))
+        return raw
+    end)
+end
+
+-- Stats: the numeric counters a game keeps (kills, distance, ...). Windows and Linux.
+local stats_supported = PLATFORM == "windows" or PLATFORM == "linux"
+-- The frontend sends entries { kind = "i" | "f" | "a", name = "...", value = ... } (kind from the schema: integer, float,
+-- average rate; value only when writing). They reach the helper as lines "i:NAME" or "i:NAME=123"; numbers are re-formatted
+-- here, so nothing the frontend sends is passed on as text.
+local function stat_lines(list, with_value)
+    local lines = {}
+    for _, item in ipairs(type(list) == "table" and list or {}) do
+        local kind = type(item) == "table" and tostring(item.kind or "") or ""
+        local name = type(item) == "table" and clean_name(item.name or "") or ""
+        if (kind == "i" or kind == "f" or kind == "a") and name ~= "" and not name:find("[=:]") then
+            if not with_value then
+                lines[#lines + 1] = kind .. ":" .. name
+            else
+                local number = tonumber(item.value)
+                if kind == "i" and number and number == math.floor(number) and math.abs(number) < 2147483648 then
+                    lines[#lines + 1] = string.format("i:%s=%d", name, number)
+                elseif kind == "f" and number and number == number and math.abs(number) < 3.4e38 then
+                    lines[#lines + 1] = string.format("f:%s=%.9g", name, number)
+                end
+            end
+        end
+    end
+    return lines
+end
+
+---@ffi
+---@param request string
+---@return string
+function am_stats(request)
+    return with_lock(function()
+        local data = parse_request(request)
+        local id = data.steam_app_id
+        if not valid_appid(id) then return fail("invalid_appid") end
+        if not stats_supported then return fail("stats_unavailable", PLATFORM) end
+
+        local lines = stat_lines(data.stats, false)
+        if #lines == 0 then return fail("nothing_to_apply") end
+
+        local raw, err, detail = run_helper("stats " .. id, lines)
+        if not raw then return fail(err or "stats_failed", detail) end
+        return raw
+    end)
+end
+
+---@ffi
+---@param request string
+---@return string
+function am_stats_apply(request)
+    return with_lock(function()
+        local data = parse_request(request)
+        local id = data.steam_app_id
+        if not valid_appid(id) then return fail("invalid_appid") end
+        if not stats_supported then return fail("stats_unavailable", PLATFORM) end
+
+        local lines = stat_lines(data.set, true)
+        if #lines == 0 then return fail("nothing_to_apply") end
+
+        local raw, err, detail = run_helper("setstats " .. id, lines)
+        if not raw then return fail(err or "stats_failed", detail) end
+        logger:info(string.format("Achievement Manager: app %s, %d stat(s) written", id, #lines))
         return raw
     end)
 end
