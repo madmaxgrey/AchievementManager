@@ -7,6 +7,7 @@ A [Millennium](https://steambrew.app) plugin that adds an **Achievement Manager*
 - under each achievement, the share of all players who have it (Steam's public numbers, fetched from Steam's Web API with just the game's app ID)
 - a **Stats** view for the game's numeric stats (kills, distance and the like): change a value and press Apply; Steam's own limits for each stat apply
 - *Unlock shown* / *Lock shown* for whatever the search and filter currently show
+- four **window designs** to pick from in the plugin's settings (**Window design**): Classic, Showcase (a tile grid), Table (selection boxes for bulk changes) and Split (a list with a large detail pane). The choice applies the next time the window opens
 - changes are **staged** first; **Apply** asks for a confirmation, then writes them to your Steam account and waits for Steam to confirm the save
 
 

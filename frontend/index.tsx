@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.13.0. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
+/* Achievement Manager 1.14.0. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
 import { definePlugin, Field } from 'millennium';
 
 const React = (window as any).SP_REACT;
@@ -170,11 +170,52 @@ function extractAchievements(roots, appId, language) {
 }
 
 /* icons in the schema are bare file names (often without an extension) */
-function iconUrl(appId, icon) {
-  if (!icon) return '';
-  if (/^https?:/i.test(icon)) return icon;
-  const file = /\.[a-z0-9]{2,4}$/i.test(icon) ? icon : icon + '.jpg';
-  return `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${appId}/${file}`;
+// Where Steam keeps achievement icons. Steam moved its community images to shared.<cdn>.steamstatic.com/community_assets/...
+// (its store page serves a game's community image from there), and images uploaded for newer games may exist only at the
+// new place, so the new hosts come first and the old cdn.* ones follow.
+const ICON_BASES = [
+  id => `https://shared.cloudflare.steamstatic.com/community_assets/images/apps/${id}/`,
+  id => `https://shared.akamai.steamstatic.com/community_assets/images/apps/${id}/`,
+  id => `https://shared.fastly.steamstatic.com/community_assets/images/apps/${id}/`,
+  id => `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${id}/`,
+  id => `https://cdn.steamstatic.com/steamcommunity/public/images/apps/${id}/`,
+  id => `https://cdn.akamai.steamstatic.com/steamcommunity/public/images/apps/${id}/`,
+];
+let preferredIconBase = '';   // the first base that loaded an image; later icons try it first
+
+// The addresses to try for one achievement's icon, best first. `names` are the schema's icon values (the one to show first,
+// then the other state's). A value may or may not carry an extension; a .jpg is tried as .png as well.
+function iconCandidates(appId, names) {
+  const out = [];
+  const add = url => { if (url && out.indexOf(url) < 0) out.push(url); };
+  const bases = ICON_BASES.map(make => make(appId));
+  if (preferredIconBase) { const i = bases.indexOf(preferredIconBase); if (i > 0) { bases.splice(i, 1); bases.unshift(preferredIconBase); } }
+  const list = (names || []).filter(Boolean);
+  list.forEach((raw, position) => {
+    if (/^https?:/i.test(raw)) { add(raw); return; }
+    const hasExt = /\.[a-z0-9]{2,4}$/i.test(raw);
+    const file = hasExt ? raw : raw + '.jpg';
+    const swapped = file.replace(/\.[a-z0-9]{2,4}$/i, m => (m.toLowerCase() === '.jpg' ? '.png' : '.jpg'));
+    bases.forEach(base => add(base + file));                                   // the icon as the schema names it, on every host
+    if (position === 0) bases.slice(0, 3).forEach(base => add(base + swapped)); // the other extension, on the first hosts only
+  });
+  return out;
+}
+
+// An achievement's icon. When an address fails it tries the next one; when all fail it shows a plain tile instead of the
+// browser's broken-image symbol.
+function AchievementIcon({ appId, names, dim }) {
+  const key = String(appId) + '|' + (names || []).join('|');
+  const candidates = React.useMemo(() => iconCandidates(appId, names), [key]);
+  const [tried, setTried] = React.useState({ key, index: 0 });
+  const index = tried.key === key ? tried.index : 0;
+  if (index >= candidates.length) return h('div', { className: 'amw-rowicon amw-rowicon-none', 'aria-hidden': 'true' });
+  const url = candidates[index];
+  return h('img', {
+    className: 'amw-rowicon', src: url, alt: '', style: { opacity: dim ? 0.55 : 1 },
+    onLoad: () => { preferredIconBase = url.slice(0, url.lastIndexOf('/') + 1); },
+    onError: () => setTried({ key, index: index + 1 }),
+  });
 }
 
 /* The button and the window.
@@ -331,7 +372,7 @@ const explain = res => {
 
 
 // Steam's logo, as a 24x24 SVG path (drawn in the loading screen)
-const PLUGIN_VERSION = '1.13.0';   // keep in step with millennium.toml; shown in diagnose() reports
+const PLUGIN_VERSION = '1.14.0';   // keep in step with millennium.toml; shown in diagnose() reports
 
 const STEAM_LOGO = 'M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z';
 
@@ -373,7 +414,7 @@ function rowsFrom(res, appId) {
       known: !!meta,
       title: info.title || name,
       description: info.description || '',
-      icon: iconUrl(appId, state.achieved ? info.icon : (info.iconGray || info.icon)),
+      iconNames: state.achieved ? [info.icon, info.iconGray] : [info.iconGray || info.icon, info.icon],
       hidden: !!info.hidden,
       isProtected: (info.permission || 0) !== 0,   // the game sets this achievement itself; the schema says so with a non-zero permission
       achieved: !!state.achieved,
@@ -417,6 +458,7 @@ const CSS = `
 .amw-root .amw-list{flex:1 1 0;min-height:0;margin:0 !important;padding:6px 24px 22px !important;overflow-x:hidden;overflow-y:auto;gap:0;-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 22px),transparent)}
 .amw-root .amw-row{display:flex;align-items:center;gap:14px;box-sizing:border-box;margin:0 0 6px;padding:10px 16px 10px 12px;border-radius:var(--amw-rowr,4px);background:color-mix(in srgb, #fff 5%, transparent);border:1px solid color-mix(in srgb, #fff 8%, transparent)}
 .amw-root .amw-rowicon{flex:none;display:block;width:40px;height:40px;border-radius:2px}
+.amw-root .amw-rowicon-none{box-sizing:border-box;border:1px solid color-mix(in srgb, currentColor 18%, transparent);background:color-mix(in srgb, currentColor 6%, transparent)}
 .amw-root .amw-rowtext{flex:1 1 auto;min-width:0}
 .amw-root .amw-rowtitle{font-size:14px;line-height:19px;font-weight:600;color:#fff;overflow-wrap:anywhere}
 .amw-root .amw-rowdesc{margin-top:2px;font-size:12px;line-height:16px;font-weight:400;color:rgba(255,255,255,.62);white-space:normal;overflow-wrap:anywhere}
@@ -460,6 +502,423 @@ const CSS = `
 .amw-fallback .amw-main{background:#1c222b}
 `;
 
+/* ═════════════ window designs ═════════════ */
+
+// Which layout the window uses; chosen in the plugin's settings and read each time the window opens.
+const DESIGNS = [
+  ['classic', 'Classic', 'A navigation column on the left and one card per achievement, like Steam\'s game Properties window.'],
+  ['showcase', 'Showcase', 'A grid of achievement tiles with a rarity bar. Click a tile to unlock or lock it.'],
+  ['table', 'Table', 'A compact table with tick boxes, so many achievements can be unlocked or locked together.'],
+  ['split', 'Split', 'A list on the left and a large detail pane on the right, with a rarity tier and one Unlock or Lock button.'],
+];
+const DESIGN_KEY = 'achievement-manager.design';
+function readDesign() {
+  try { const v = window.localStorage.getItem(DESIGN_KEY); if (DESIGNS.some(d => d[0] === v)) return v; } catch (e) { /* storage unavailable */ }
+  return 'classic';
+}
+function writeDesign(id) {
+  try { window.localStorage.setItem(DESIGN_KEY, id); } catch (e) { /* storage unavailable */ }
+}
+
+// extra rules for the three new designs; they sit on top of the shared CSS above and use only text-colour mixes
+const ALT_CSS = `
+.amw-root.amw-alt .amw-main{padding:0}
+.amx-wrap{flex:1 1 0;min-height:0;display:flex;flex-direction:column;gap:12px;box-sizing:border-box;padding:18px 22px 16px;font-size:14px}
+.amx-wrap *{box-sizing:border-box}
+.amx-head{flex:none;display:flex;align-items:center;gap:12px;min-height:32px;padding-right:48px}
+.amx-titles{margin-right:auto;min-width:0}
+.amx-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:20px;line-height:26px;font-weight:700}
+.amx-subtitle{font-size:13px;line-height:18px;opacity:.65}
+.amx-pill{flex:none;padding:3px 11px;border-radius:999px;font-size:12px;background:color-mix(in srgb,currentColor 12%,transparent)}
+.amx-row{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.amx-grow{flex:1 1 auto}
+.amx-seg{flex:none;display:inline-flex;gap:6px}
+.amx-btn{box-sizing:border-box;width:auto;min-width:0;margin:0;padding:0 16px;white-space:nowrap}
+.amx-btn.amx-on{background:color-mix(in srgb,currentColor 22%,transparent) !important;box-shadow:inset 0 0 0 1px color-mix(in srgb,currentColor 45%,transparent) !important}
+.amx-search{flex:none;min-width:0}
+.amx-row > .amx-search{flex:1 1 160px}
+.amx-filter{flex:none;width:170px}
+.amx-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+.amx-pair .amx-sort,.amx-pair .amx-filter{width:auto}
+.amx-sort{flex:none;width:190px}
+.amx-ok{color:#8fcf5a}.amx-bad{color:#ee7a70}.amx-warn{color:#ffc82c}
+.amx-list{flex:1 1 0;min-height:0;margin:0 !important;padding:0 4px 0 0 !important;overflow-x:hidden;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.amx-grid > .amx-more{grid-column:1 / -1}
+.amx-more{flex:none;display:flex;justify-content:center;padding:6px 0}
+.amx-foot{flex:none;display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:1px solid color-mix(in srgb,currentColor 14%,transparent)}
+.amx-status{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:13px;line-height:18px}
+.amx-status .amx-ok{color:#8fcf5a}.amx-status .amx-bad{color:#ee7a70}.amx-status .amx-warn{color:#ffc82c}
+.amx-statusnote{opacity:.6}
+.amx-statusnote.amx-after{margin-left:10px}
+.amx-bar{display:flex;align-items:center;gap:8px}
+.amx-bar .amx-btn,.amx-bulk .amx-btn{flex:0 0 auto;width:auto !important;min-width:120px}
+.amx-spacer{flex:1 1 0}
+.amx-ctitle{font-weight:600;line-height:19px;overflow-wrap:anywhere}
+.amx-sub{font-size:12px;line-height:16px;opacity:.65;overflow-wrap:anywhere}
+.amx-text{flex:1 1 auto;min-width:0}
+.amx-check{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:1.5px solid color-mix(in srgb,currentColor 45%,transparent);cursor:pointer}
+.amx-check.amx-checked{background:color-mix(in srgb,currentColor 24%,transparent);border-color:currentColor}
+
+/* showcase */
+.amx-grid{flex:1 1 0;min-height:0;margin:0 !important;padding:2px 4px 8px 2px !important;overflow-x:hidden;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;align-content:start}
+.amx-tile{position:relative;display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:6px;cursor:pointer;user-select:none;border:1px solid color-mix(in srgb,currentColor 10%,transparent);background:color-mix(in srgb,currentColor 6%,transparent);transition:background .12s ease,border-color .12s ease}
+.amx-tile:hover{background:color-mix(in srgb,currentColor 10%,transparent)}
+.amx-tile:focus-visible{outline:2px solid color-mix(in srgb,currentColor 60%,transparent);outline-offset:1px}
+.amx-tile.amx-changed{border-color:color-mix(in srgb,currentColor 55%,transparent);background:color-mix(in srgb,currentColor 11%,transparent)}
+.amx-tile.amx-protected{cursor:not-allowed}
+.amx-tile.amx-stat{cursor:default}
+.amx-tile.amx-off .amw-rowicon{filter:grayscale(1)}
+.amx-tilehead{display:flex;align-items:center;gap:12px;padding-right:26px}
+.amw-root .amx-tile .amw-rowicon{width:52px;height:52px;border-radius:3px}
+.amx-tile > .amx-check,.amx-tile > .amw-protecticon{position:absolute;top:10px;right:10px;margin:0}
+.amx-tdesc{min-height:48px;font-size:12px;line-height:16px;opacity:.72;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.amx-rarity{display:flex;align-items:center;gap:8px;min-height:12px;font-size:11px;opacity:.85}
+.amx-rbar{flex:1 1 auto;height:4px;border-radius:2px;overflow:hidden;background:color-mix(in srgb,currentColor 14%,transparent)}
+.amx-rfill{height:100%;background:currentColor;opacity:.7}
+.amx-tile .amw-statinput{width:100%}
+
+/* table */
+.amx-trow{flex:none;display:grid;grid-template-columns:24px 30px minmax(0,1fr) 130px 120px 56px;align-items:center;gap:10px;padding:5px 10px;border-radius:3px}
+.amx-trow.amx-statrow{grid-template-columns:minmax(0,1fr) 190px}
+.amx-trow.amx-hd{padding-top:2px;padding-bottom:6px;border-bottom:1px solid color-mix(in srgb,currentColor 14%,transparent);border-radius:0;font-size:12px;font-weight:600;opacity:.75;user-select:none}
+.amx-trow.amx-hd .amx-sortable{cursor:pointer}
+.amx-trow.amx-hd .amx-sortable:hover{opacity:1}
+.amx-body{flex:1 1 0;min-height:0;margin:0 !important;padding:0 4px 0 0 !important;overflow-x:hidden;overflow-y:auto;display:flex;flex-direction:column;gap:0}
+.amx-body > .amx-trow:nth-child(even){background:color-mix(in srgb,currentColor 4%,transparent)}
+.amx-trow.amx-changed{box-shadow:inset 3px 0 0 color-mix(in srgb,currentColor 60%,transparent)}
+.amx-trow.amx-sel{background:color-mix(in srgb,currentColor 10%,transparent) !important}
+.amw-root .amx-trow .amw-rowicon{width:28px;height:28px;border-radius:2px}
+.amx-trow .amx-ctitle,.amx-trow .amx-sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.amx-trow .amx-ctitle{font-size:13px;line-height:17px}
+.amx-cell{min-width:0;font-size:12px}
+.amx-trow .amw-rowtoggle{min-width:0}
+.amx-bulk{flex:none;display:flex;align-items:center;gap:8px;min-height:32px}
+.amx-bulk .amx-sub{flex:1 1 auto;min-width:0;margin-right:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* split */
+.amx-split{flex:1 1 0;min-height:0;display:flex;gap:16px}
+.amx-splitlist{flex:none;width:350px;display:flex;flex-direction:column;gap:10px;min-height:0}
+.amx-srow{flex:none;display:flex;align-items:center;gap:10px;padding:6px 10px 6px 6px;border-radius:4px;cursor:pointer;border:1px solid transparent}
+.amx-srow:hover{background:color-mix(in srgb,currentColor 8%,transparent)}
+.amx-srow.amx-picked{background:color-mix(in srgb,currentColor 14%,transparent);border-color:color-mix(in srgb,currentColor 30%,transparent)}
+.amx-srow.amx-changed{box-shadow:inset 3px 0 0 color-mix(in srgb,currentColor 60%,transparent)}
+.amx-srow:focus-visible{outline:2px solid color-mix(in srgb,currentColor 60%,transparent);outline-offset:1px}
+.amw-root .amx-srow .amw-rowicon{width:36px;height:36px;border-radius:3px}
+.amx-srow .amx-ctitle{font-size:13px;line-height:17px}
+.amx-srow .amx-ctitle,.amx-srow .amx-sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.amx-srow .amw-rowtoggle{flex:none;min-width:0}
+.amx-pane{flex:1 1 0;min-width:0;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:14px;padding:22px;border-radius:6px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);background:color-mix(in srgb,currentColor 6%,transparent)}
+.amx-panehead{display:flex;align-items:center;gap:18px}
+.amw-root .amx-pane .amw-rowicon{width:96px;height:96px;border-radius:6px}
+.amx-pane .amx-ctitle{font-size:20px;line-height:26px}
+.amx-tier{display:inline-block;align-self:flex-start;margin-top:6px;padding:1px 9px;border-radius:999px;font-size:11px;font-weight:600;background:color-mix(in srgb,currentColor 14%,transparent)}
+.amx-panedesc{font-size:14px;line-height:20px;opacity:.88;overflow-wrap:anywhere}
+.amx-pane .amx-rbar{height:8px;border-radius:4px}
+.amx-pane .amx-rarity{font-size:12px;opacity:1}
+.amx-facts{display:flex;flex-direction:column;gap:4px;font-size:13px;opacity:.75}
+
+`;
+
+const fmtWhen = t => (t ? new Date(t * 1000).toLocaleString() : '');
+
+// what a layout needs to know about one achievement / one stat
+function rowInfo(m, row) {
+  const now = m.wanted(row);
+  const edited = m.has(row.name);
+  return {
+    now, edited,
+    desc: row.description || (row.hidden ? 'Hidden achievement' : ''),
+    unlocked: row.achieved && row.unlockTime ? 'Unlocked ' + fmtWhen(row.unlockTime) : '',
+    will: edited ? (now ? 'Will be unlocked' : 'Will be locked') : '',
+    pct: row.percent != null ? row.percent : null,
+  };
+}
+function statInfo(m, def) {
+  const known = m.hasStat(def.id);
+  const edited = Object.prototype.hasOwnProperty.call(m.statEdits, def.id);
+  const text = edited ? m.statEdits[def.id] : (known ? String(m.statValues[def.id]) : '');
+  const check = edited ? checkStat(def, text, known ? m.statValues[def.id] : null) : null;
+  const meta = [def.kind === 'i' ? 'Whole number' : def.kind === 'f' ? 'Decimal number' : 'Average rate'];
+  if (def.title !== def.id) meta.push(def.id);
+  if (def.min != null && def.min > -1e9) meta.push('min ' + def.min);
+  if (def.max != null && def.max < 1e9) meta.push('max ' + def.max);
+  if (def.increment) meta.push('can only go up');
+  if (def.locked) meta.push(def.reason);
+  if (!known) meta.push('Steam does not report this stat');
+  return { known, edited, text, check, meta: meta.join('  ·  ') };
+}
+const statStepper = (m, def, i) => h(Stepper, { def, text: i.text, current: i.known ? m.statValues[def.id] : null, known: i.known, bad: !!(i.check && !i.check.ok), onChange: t => m.setStatText(def, t) });
+
+// Steam's own buttons, like the Classic design, so themes style them
+const AltButton = API.DialogButton || API.Button;
+const AltPrimary = API.DialogButtonPrimary || AltButton;
+const altBtn = (label, onClick, o = {}) => h(o.primary ? AltPrimary : AltButton, {
+  key: o.key, title: o.title, disabled: !!o.disabled, onClick, className: 'amx-btn' + (o.on ? ' amx-on' : ''),
+}, label);
+
+const checkMark = () => h('svg', { viewBox: '0 0 16 16', width: 12, height: 12, 'aria-hidden': 'true' },
+  h('path', { d: 'M3 8.5l3.2 3.2L13 5', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' }));
+const checkBox = (on, onClick, key) => h('span', {
+  key, role: 'checkbox', 'aria-checked': on, className: 'amx-check' + (on ? ' amx-checked' : ''),
+  onClick: e => { e.stopPropagation(); if (onClick) onClick(); },
+}, on ? checkMark() : null);
+
+const altStatusClass = st => (st.cls ? 'amx-' + st.cls.replace('amw-', '') : '');
+function altInStats(m) { return m.view === 'stats' && m.statsAvailable; }
+
+// stats that are still being read (or failed to read): shown instead of the list
+function altWaiting(m) {
+  if (!altInStats(m) || m.statsPhase === 'ready') return null;
+  if (m.statsPhase === 'error') {
+    return h('div', { className: 'amw-center' }, h('div', { className: 'amw-msg' }, m.statsProblem), h(m.DButton, { onClick: () => m.setStatsPhase('idle') }, 'Try again'));
+  }
+  return h('div', { className: 'amw-center' }, h('div', { className: 'amw-msg' }, 'Reading stats from Steam...'));
+}
+
+function altViewTabs(m, cls) {
+  if (!m.statsAvailable) return null;
+  return h('div', { className: cls },
+    altBtn('Achievements', () => m.switchView('achievements'), { key: 'a', on: m.view === 'achievements' }),
+    altBtn('Stats', () => m.switchView('stats'), { key: 's', on: m.view === 'stats' }));
+}
+function altFilter(m) {
+  return h('div', { key: 'filter', className: 'amx-filter' },
+    h(API.Dropdown, {
+      rgOptions: FILTERS.map(([key, label]) => ({ label: (key === 'All' ? 'All' : label) + ' (' + m.counts[key] + ')', data: key })),
+      selectedOption: m.filter, onChange: o => { m.setFilter(o.data); m.setLimit(PAGE); }, contextMenuPositionOptions: { bMatchWidth: false },
+    }));
+}
+// Steam's TextField, as in the Classic design (themes give it the search icon)
+function altSearch(m) {
+  const stats = altInStats(m);
+  return h('div', { key: 'search', className: 'amx-search' },
+    h(API.TextField, {
+      value: stats ? m.statSearch : m.search, placeholder: stats ? 'Search stats...' : 'Search achievements...',
+      onChange: e => { if (stats) m.setStatSearch(e.target.value); else { m.setSearch(e.target.value); m.setLimit(PAGE); } },
+    }));
+}
+function altSort(m) {
+  return h('div', { key: 'sort', className: 'amx-sort' },
+    h(API.Dropdown, { rgOptions: SORTS.map(s => ({ label: s, data: s })), selectedOption: m.sort, onChange: o => m.setSort(o.data), contextMenuPositionOptions: { bMatchWidth: false } }));
+}
+function altMore(m) {
+  return m.visible.length > m.shown.length
+    ? h('div', { key: 'more', className: 'amx-more' }, altBtn('Show ' + (m.visible.length - m.shown.length) + ' more', () => m.setLimit(l => l + PAGE)))
+    : null;
+}
+const altEmpty = (m, stats) => h('div', { className: 'amw-empty' },
+  stats ? 'No stat matches the search.' : (m.rows.length ? 'No achievement matches the search and filter.' : 'Steam reports no achievements for this game.'));
+
+// bottom row: Revert and Apply (with the bulk buttons in the showcase and split designs)
+function altFooter(m, opts) {
+  const stats = altInStats(m);
+  const st = stats ? m.statStatus : m.status;
+  const confirming = stats ? m.statConfirming : m.confirming;
+  const edits = stats ? Object.keys(m.statEdits).length : m.changed;
+  const canApply = stats ? m.statWrites.length > 0 : m.changed > 0;
+  const bulkAll = m.filter === 'All' && !m.search.trim();   // the list is every achievement, so the buttons can say "all"
+  return h('div', { className: 'amx-foot' },
+    // the status first (while there is one), then the note Classic shows in its side column
+    h('div', { key: 'st', className: 'amx-status' },
+      st.text ? h('span', { className: altStatusClass(st) }, st.text) : null,
+      h('span', { className: 'amx-statusnote' + (st.text ? ' amx-after' : '') }, 'Changes are applied to your Steam account and can be reverted at any time.')),
+    h('div', { key: 'bar', className: 'amx-bar' },
+      !stats && opts.bulk ? [
+        altBtn(bulkAll ? 'Unlock all' : `Unlock these (${m.visible.length})`, () => m.changeMany(m.visible, true), { key: 'u', title: 'Stage every achievement in the list for unlocking', disabled: m.working || m.visible.length === 0 }),
+        altBtn(bulkAll ? 'Lock all' : `Lock these (${m.visible.length})`, () => m.changeMany(m.visible, false), { key: 'l', title: 'Stage every achievement in the list for locking', disabled: m.working || m.visible.length === 0 }),
+      ] : null,
+      h('div', { key: 'sp', className: 'amx-spacer' }),
+      !stats && m.coverage.missing > 0 ? altBtn('Reload', m.reload, { key: 'r', disabled: m.working }) : null,
+      altBtn('Discard', stats ? m.revertStats : m.revert, { key: 'v', title: 'Throw away the changes that are not applied yet', disabled: m.working || edits === 0 }),
+      altBtn(confirming ? 'Confirm' : 'Apply', stats ? m.applyStats : m.apply, { key: 'a', primary: true, disabled: m.working || !canApply })));
+}
+// a stat as a tile (Showcase)
+function statTileEl(m, def) {
+  const i = statInfo(m, def);
+  return h('div', { key: def.id, className: 'amx-tile amx-stat' + (i.edited ? ' amx-changed' : '') },
+    h('div', { className: 'amx-ctitle' }, def.title),
+    h('div', { className: 'amx-tdesc' }, i.meta),
+    i.check && !i.check.ok ? h('div', { className: 'amx-sub amx-bad' }, i.check.why) : null,
+    h('div', { className: 'amw-statinput' }, statStepper(m, def, i)));
+}
+
+/* ───── design: showcase (a grid of tiles) ───── */
+
+function ShowcaseLayout({ m }) {
+  const stats = altInStats(m);
+  const waiting = altWaiting(m);
+  const st = stats ? m.statStatus : m.status;
+  const tile = row => {
+    const i = rowInfo(m, row);
+    const toggle = () => { if (!row.isProtected) m.setWanted(row, !i.now); };
+    return h('div', {
+      key: row.name, role: 'button', tabIndex: 0, onClick: toggle,
+      onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } },
+      title: row.isProtected ? 'This achievement is protected.' : (i.now ? 'Click to lock' : 'Click to unlock'),
+      className: 'amx-tile' + (i.now ? ' amx-on' : ' amx-off') + (i.edited ? ' amx-changed' : '') + (row.isProtected ? ' amx-protected' : ''),
+    },
+      h('div', { className: 'amx-tilehead' },
+        h(AchievementIcon, { appId: m.appId, names: row.iconNames, dim: !i.now }),
+        h('div', { className: 'amx-text' },
+          h('div', { className: 'amx-ctitle' }, row.title),
+          h('div', { className: 'amx-sub' }, i.edited ? i.will : (i.now ? (i.unlocked || 'Unlocked') : 'Locked')))),
+      row.isProtected ? h(ProtectedIcon) : h('span', { className: 'amx-check' + (i.now ? ' amx-checked' : '') }, i.now ? checkMark() : null),
+      h('div', { className: 'amx-tdesc', title: i.desc }, i.desc),
+      h('div', { className: 'amx-rarity' + (i.pct == null ? ' amx-none' : ''), title: i.pct == null ? undefined : i.pct.toFixed(1) + '% of players have this achievement' },
+        i.pct == null ? null : [
+          h('div', { key: 'bar', className: 'amx-rbar' }, h('div', { className: 'amx-rfill', style: { width: Math.max(0, Math.min(100, i.pct)) + '%' } })),
+          h('span', { key: 'n' }, i.pct.toFixed(1) + '%')]));
+  };
+  const grid = stats
+    ? (m.listedStats.length ? h('div', { key: 'grid', className: 'amx-grid DialogBody' }, m.listedStats.map(def => statTileEl(m, def))) : h('div', { key: 'grid', className: 'amx-list DialogBody' }, altEmpty(m, true)))
+    : (m.shown.length
+      ? h('div', { key: 'grid', className: 'amx-grid DialogBody' }, m.shown.map(tile), altMore(m))
+      : h('div', { key: 'grid', className: 'amx-list DialogBody' }, altEmpty(m, false)));
+  return h('div', { className: 'amx-wrap amx-showcase' },
+    h('div', { className: 'amx-head' },
+      h('div', { className: 'amx-titles' },
+        h('div', { className: 'amx-title' }, m.gameName || TITLE),
+        h('div', { className: 'amx-subtitle' }, stats ? `${m.statDefs.length} stat${m.statDefs.length === 1 ? '' : 's'}` : `${m.unlockedNow} of ${m.rows.length} unlocked (${m.percent}%)`)),
+      altViewTabs(m, 'amx-seg')),
+    stats ? null : h('div', { key: 'progress', style: { flex: 'none' } }, h(API.ProgressBar, { nProgress: m.percent })),
+    waiting || [
+      h('div', { key: 'tools', className: 'amx-row', style: { flexWrap: 'nowrap' } },
+        altSearch(m), stats ? null : altFilter(m), stats ? null : altSort(m)),
+      grid,
+      altFooter(m, { bulk: true, status: true }),
+    ]);
+}
+
+/* ───── design: table (compact, with tick boxes) ───── */
+
+function TableLayout({ m }) {
+  const stats = altInStats(m);
+  const waiting = altWaiting(m);
+  const [sel, setSel] = React.useState({});             // achievement name -> ticked
+  const ticked = m.rows.filter(r => sel[r.name] && !r.isProtected);
+  const tickable = m.visible.filter(r => !r.isProtected);
+  const allOn = tickable.length > 0 && tickable.every(r => sel[r.name]);
+  const tickAll = () => setSel(prev => { const next = { ...prev }; tickable.forEach(r => { if (allOn) delete next[r.name]; else next[r.name] = true; }); return next; });
+  const tickOne = row => setSel(prev => { const next = { ...prev }; if (next[row.name]) delete next[row.name]; else next[row.name] = true; return next; });
+  // a header click sorts by that column; clicking it again goes back to Steam's order
+  const sortBy = name => () => m.setSort(m.sort === name ? 'Steam order' : name);
+  const arrow = names => (names.includes(m.sort) ? (m.sort === 'Locked first' ? ' \u2191' : ' \u2193') : '');
+  const head = stats
+    ? h('div', { key: 'hd', className: 'amx-trow amx-statrow amx-hd' }, h('div', null, 'Stat'), h('div', null, 'Value'))
+    : h('div', { key: 'hd', className: 'amx-trow amx-hd' },
+      checkBox(allOn, tickAll, 'all'), h('div', { key: 'i' }),
+      h('div', { key: 'n', className: 'amx-sortable', onClick: sortBy('Name') }, 'Achievement' + arrow(['Name'])),
+      h('div', { key: 'r' }, 'Rarity'),
+      h('div', { key: 'u', className: 'amx-sortable', onClick: sortBy('Recently unlocked') }, 'Unlocked' + arrow(['Recently unlocked'])),
+      h('div', { key: 's', className: 'amx-sortable', onClick: () => m.setSort(m.sort === 'Unlocked first' ? 'Locked first' : (m.sort === 'Locked first' ? 'Steam order' : 'Unlocked first')) }, 'State' + arrow(['Unlocked first', 'Locked first'])));
+  const trow = row => {
+    const i = rowInfo(m, row);
+    return h('div', { key: row.name, className: 'amx-trow' + (i.edited ? ' amx-changed' : '') + (sel[row.name] ? ' amx-sel' : '') },
+      row.isProtected ? h('span', { key: 'p' }) : checkBox(!!sel[row.name], () => tickOne(row), 'c'),
+      h(AchievementIcon, { appId: m.appId, names: row.iconNames, dim: !i.now }),
+      h('div', { className: 'amx-text' },
+        h('div', { className: 'amx-ctitle', title: row.title }, row.title),
+        h('div', { className: 'amx-sub', title: i.desc }, i.edited ? i.will : i.desc)),
+      h('div', { className: 'amx-cell' }, i.pct == null ? '' : h('div', { className: 'amx-rarity' },
+        h('div', { className: 'amx-rbar' }, h('div', { className: 'amx-rfill', style: { width: Math.max(0, Math.min(100, i.pct)) + '%' } })),
+        h('span', null, i.pct.toFixed(1) + '%'))),
+      h('div', { className: 'amx-cell', title: i.unlocked }, row.achieved && row.unlockTime ? new Date(row.unlockTime * 1000).toLocaleDateString() : '\u2014'),
+      h('div', { className: 'amw-rowtoggle' + (row.isProtected ? ' amw-protected' : ''), title: row.isProtected ? 'This achievement is protected.' : undefined },
+        row.isProtected ? h(ProtectedIcon) : null,
+        h(API.Toggle, { value: i.now, disabled: !!row.isProtected, onChange: v => m.setWanted(row, v) })));
+  };
+  const srow = def => {
+    const i = statInfo(m, def);
+    return h('div', { key: def.id, className: 'amx-trow amx-statrow' + (i.edited ? ' amx-changed' : '') },
+      h('div', { className: 'amx-text' },
+        h('div', { className: 'amx-ctitle' }, def.title),
+        h('div', { className: 'amx-sub', title: i.meta }, i.check && !i.check.ok ? i.check.why : i.meta)),
+      h('div', { className: 'amw-statinput', style: { width: '100%' } }, statStepper(m, def, i)));
+  };
+  const rowsEl = stats
+    ? (m.listedStats.length ? m.listedStats.map(srow) : altEmpty(m, true))
+    : (m.shown.length ? [m.shown.map(trow), altMore(m)] : altEmpty(m, false));
+  return h('div', { className: 'amx-wrap amx-table' },
+    h('div', { className: 'amx-head' },
+      h('div', { className: 'amx-title' }, m.gameName || TITLE),
+      h('span', { className: 'amx-pill' }, stats ? `${m.statDefs.length} stats` : `${m.unlockedNow} of ${m.rows.length} unlocked (${m.percent}%)`),
+      altViewTabs(m, 'amx-seg')),
+    waiting || [
+      h('div', { key: 'tools', className: 'amx-row', style: { flexWrap: 'nowrap' } }, altSearch(m), stats ? null : altFilter(m)),
+      stats ? null : h('div', { key: 'bulk', className: 'amx-bulk' },
+        h('div', { className: 'amx-sub' }, ticked.length ? `${ticked.length} selected` : 'Select achievements with the boxes to change several at once.'),
+        altBtn('Unlock selected', () => m.changeMany(ticked, true), { key: 'u', disabled: m.working || ticked.length === 0 }),
+        altBtn('Lock selected', () => m.changeMany(ticked, false), { key: 'l', disabled: m.working || ticked.length === 0 }),
+        altBtn('Clear', () => setSel({}), { key: 'c', title: 'Clear the selection', disabled: ticked.length === 0 })),
+      head,
+      h('div', { key: 'body', className: 'amx-body DialogBody' }, rowsEl),
+      altFooter(m, { bulk: false, status: true }),
+    ]);
+}
+
+/* ───── design: split (a list and a detail pane) ───── */
+
+const rarityTier = pct => (pct == null ? '' : pct >= 50 ? 'Common' : pct >= 20 ? 'Uncommon' : pct >= 5 ? 'Rare' : 'Ultra rare');
+
+function SplitLayout({ m }) {
+  const stats = altInStats(m);
+  const waiting = altWaiting(m);
+  const [sel, setSel] = React.useState('');
+  // the pinned row if it is still listed, otherwise the first one
+  const focus = m.visible.find(r => r.name === sel) || m.visible[0] || null;
+  const info = focus ? rowInfo(m, focus) : null;
+  const toggle = row => { if (!row.isProtected) m.setWanted(row, !m.wanted(row)); };
+  const srow = row => {
+    const i = rowInfo(m, row);
+    return h('div', {
+      key: row.name, role: 'button', tabIndex: 0, onClick: () => setSel(row.name),
+      onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSel(row.name); } },
+      className: 'amx-srow' + (focus && focus.name === row.name ? ' amx-picked' : '') + (i.edited ? ' amx-changed' : ''),
+    },
+      h(AchievementIcon, { appId: m.appId, names: row.iconNames, dim: !i.now }),
+      h('div', { className: 'amx-text' },
+        h('div', { className: 'amx-ctitle', title: row.title }, row.title),
+        h('div', { className: 'amx-sub' }, i.edited ? i.will : (i.now ? 'Unlocked' : 'Locked'))),
+      h('div', { className: 'amw-rowtoggle' + (row.isProtected ? ' amw-protected' : ''), onClick: e => e.stopPropagation(), title: row.isProtected ? 'This achievement is protected.' : undefined },
+        row.isProtected ? h(ProtectedIcon) : null,
+        h(API.Toggle, { value: i.now, disabled: !!row.isProtected, onChange: v => m.setWanted(row, v) })));
+  };
+  const pane = h('div', { key: 'pane', className: 'amx-pane DialogBody' },
+    !focus ? h('div', { className: 'amw-empty' }, m.rows.length ? 'No achievement matches the search and filter.' : 'Steam reports no achievements for this game.') : [
+      h('div', { key: 'head', className: 'amx-panehead' },
+        h(AchievementIcon, { appId: m.appId, names: focus.iconNames, dim: !info.now }),
+        h('div', { className: 'amx-text' },
+          h('div', { className: 'amx-ctitle' }, focus.title),
+          h('div', { className: 'amx-sub' }, info.edited ? info.will : (info.now ? 'Unlocked' : 'Locked')),
+          info.pct != null ? h('span', { className: 'amx-tier' }, rarityTier(info.pct)) : null)),
+      info.desc ? h('div', { key: 'desc', className: 'amx-panedesc' }, info.desc) : null,
+      info.pct != null ? h('div', { key: 'pct', className: 'amx-rarity' },
+        h('div', { className: 'amx-rbar' }, h('div', { className: 'amx-rfill', style: { width: Math.max(0, Math.min(100, info.pct)) + '%' } })),
+        h('span', null, info.pct.toFixed(1) + '% of players')) : null,
+      info.unlocked ? h('div', { key: 'facts', className: 'amx-facts' }, h('div', null, info.unlocked)) : null,
+      h('div', { key: 'act', className: 'amx-row' },
+        altBtn(focus.isProtected ? 'Protected' : info.edited ? 'Undo' : info.now ? 'Lock' : 'Unlock', () => toggle(focus),
+          { primary: true, disabled: !!focus.isProtected, title: focus.isProtected ? 'This achievement is protected.' : undefined }))]);
+  const list = h('div', { key: 'list', className: 'amx-splitlist' },
+    altSearch(m),
+    h('div', { className: 'amx-pair' }, altFilter(m), altSort(m)),
+    h('div', { className: 'amx-list DialogBody' }, m.shown.length ? [m.shown.map(srow), altMore(m)] : altEmpty(m, false)));
+  const statsGrid = h('div', { key: 'grid', className: 'amx-grid DialogBody' }, m.listedStats.length ? m.listedStats.map(def => statTileEl(m, def)) : altEmpty(m, true));
+  return h('div', { className: 'amx-wrap amx-splitwrap' },
+    h('div', { className: 'amx-head' },
+      h('div', { className: 'amx-titles' },
+        h('div', { className: 'amx-title' }, m.gameName || TITLE),
+        h('div', { className: 'amx-subtitle' }, stats ? `${m.statDefs.length} stat${m.statDefs.length === 1 ? '' : 's'}` : `${m.unlockedNow} of ${m.rows.length} unlocked (${m.percent}%)`)),
+      altViewTabs(m, 'amx-seg')),
+    waiting || [
+      stats ? [h('div', { key: 'tools', className: 'amx-row' }, altSearch(m)), statsGrid]
+        : h('div', { key: 'split', className: 'amx-split' }, list, pane),
+      altFooter(m, { bulk: true, status: true }),
+    ]);
+}
+
+const ALT_LAYOUTS = { showcase: ShowcaseLayout, table: TableLayout, split: SplitLayout };
+
 function ManagerWindow({ appId, gameName, closeModal }) {
   const [phase, setPhase] = React.useState('loading');       // loading | ready | error
   const [problem, setProblem] = React.useState('');
@@ -485,6 +944,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
   const [statsProblem, setStatsProblem] = React.useState('');
   const [statSearch, setStatSearch] = React.useState('');
   const [statConfirming, setStatConfirming] = React.useState(false);
+  const design = React.useMemo(readDesign, []);                // classic | showcase | table | split, chosen in the plugin's settings
 
   React.useEffect(() => { alive.current = true; return () => { alive.current = false; clearTimeout(confirmTimer.current); }; }, []);
 
@@ -512,7 +972,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
       }
       const navItem = el.querySelector('.amw-nav-item');
       const radius = navItem ? view.getComputedStyle(navItem).borderTopLeftRadius : '';
-      const next = { fallback: bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent', title: accent, radius, backdropColor, backdropImage };
+      const next = { fallback: design === 'classic' && (bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent'), title: accent, radius, backdropColor, backdropImage };
       setLook(prev => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
     } catch (e) { /* keep the defaults */ }
   }, [phase]);
@@ -710,11 +1170,25 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     h('div', { key: 'backdrop', className: 'amw-backdrop', style: { backgroundColor: look.backdropColor || undefined, backgroundImage: look.backdropImage || undefined } }),
     h('div', {
         key: 'root', ref: rootRef,
-        className: 'amw-root _2sssIwe0duyIrFvat2oXzH' + (look.fallback ? ' amw-fallback' : ''),
+        className: 'amw-root _2sssIwe0duyIrFvat2oXzH' + (look.fallback ? ' amw-fallback' : '') + (design === 'classic' ? '' : ' amw-alt amx-design-' + design),
         style: (look.title || look.radius) ? { '--amw-title': look.title || undefined, '--amw-rowr': look.radius || undefined } : undefined,
       },
-      h('style', null, CSS), sideColumn, h('div', { className: 'amw-main DialogContent_InnerWidth' }, main)),
+      h('style', null, design === 'classic' ? CSS : CSS + ALT_CSS),
+      design === 'classic' ? sideColumn : null, h('div', { className: 'amw-main DialogContent_InnerWidth' }, main)),
   ];
+
+  // one line at the bottom: the question while confirming, otherwise the last result or the number of changes
+  const percent = rows.length ? Math.round((unlockedNow / rows.length) * 1000) / 10 : 0;
+  let status = { cls: '', text: changed ? `${changed} change${changed === 1 ? '' : 's'} not saved yet` : '' };
+  if (confirming) status = { cls: 'amw-warn', text: `Unlock ${toUnlock.length}, lock ${toLock.length}? Press Confirm to save to your Steam account.` };
+  else if (working) status = { cls: '', text: 'Saving to your Steam account...' };
+  else if (notice) status = { cls: notice.ok ? 'amw-ok' : 'amw-bad', text: notice.text };
+  else if (!changed && coverage.missing > 0) status = { cls: 'amw-warn', text: coverage.schemaFound ? `${coverage.missing} of ${rows.length} names and icons are missing; their ID is shown.` : 'Steam has not saved this game\'s achievement list yet, so IDs are shown. Reload in a moment.' };
+  let statStatus = { cls: '', text: Object.keys(statEdits).length ? `${Object.keys(statEdits).length} change${Object.keys(statEdits).length === 1 ? '' : 's'} not saved yet` : '' };
+  if (statConfirming) statStatus = { cls: 'amw-warn', text: `Write ${statWrites.length} stat${statWrites.length === 1 ? '' : 's'}? Press Confirm to save to your Steam account.` };
+  else if (working) statStatus = { cls: '', text: 'Saving to your Steam account...' };
+  else if (notice) statStatus = { cls: notice.ok ? 'amw-ok' : 'amw-bad', text: notice.text };
+  else if (statInvalid) statStatus = { cls: 'amw-warn', text: `${statInvalid} value${statInvalid === 1 ? ' is' : 's are'} not acceptable and will be skipped.` };
 
   if (phase === 'loading') {
     // the loader Steam shows when it waits on something: its logo, a ring turning around it, a line of text.
@@ -735,6 +1209,25 @@ function ManagerWindow({ appId, gameName, closeModal }) {
       h('div', { className: 'amw-title' }, TITLE),
       h('div', { className: 'amw-msg' }, problem),
       h(DButton, { onClick: load }, 'Try again')));
+  }
+
+  // the other designs share all state and actions with the classic one and only draw them differently
+  if (design !== 'classic') {
+    const needle = statSearch.trim().toLowerCase();
+    const model = {
+      appId, gameName, DButton, rows, visible, shown: visible.slice(0, limit), setLimit,
+      filter, setFilter, search, setSearch, sort, setSort, view, statsAvailable,
+      statDefs, statsPhase, statsProblem, setStatsPhase, statValues, statEdits, statSearch, setStatSearch, setStatText, hasStat,
+      listedStats: statDefs.filter(d => !needle || d.title.toLowerCase().includes(needle) || d.id.toLowerCase().includes(needle)),
+      counts: { All: rows.length, Unlocked: unlockedNow, Locked: rows.length - unlockedNow, Changed: changed },
+      unlockedNow, changed, percent, wanted, has, setWanted, changeMany, working, confirming, statConfirming, status, statStatus, statWrites, coverage,
+      apply, applyStats,
+      switchView: key => { setView(key); setConfirming(false); setStatConfirming(false); setNotice(null); },
+      revert: () => { setEdits({}); setConfirming(false); setNotice(null); },
+      revertStats: () => { setStatEdits({}); setStatConfirming(false); setNotice(null); },
+      reload: () => { retried.current = false; load(); },
+    };
+    return frame(h(ALT_LAYOUTS[design] || ShowcaseLayout, { m: model }));
   }
 
   if (view === 'stats' && statsAvailable) {
@@ -769,11 +1262,6 @@ function ManagerWindow({ appId, gameName, closeModal }) {
         h('div', { className: 'amw-statinput' },
           h(Stepper, { def, text, current: known ? statValues[def.id] : null, known, bad: !!(check && !check.ok), onChange: t => setStatText(def, t) })));
     };
-    let statStatus = { cls: '', text: Object.keys(statEdits).length ? `${Object.keys(statEdits).length} change${Object.keys(statEdits).length === 1 ? '' : 's'} not saved yet` : '' };
-    if (statConfirming) statStatus = { cls: 'amw-warn', text: `Write ${statWrites.length} stat${statWrites.length === 1 ? '' : 's'}? Press Confirm to save to your Steam account.` };
-    else if (working) statStatus = { cls: '', text: 'Saving to your Steam account...' };
-    else if (notice) statStatus = { cls: notice.ok ? 'amw-ok' : 'amw-bad', text: notice.text };
-    else if (statInvalid) statStatus = { cls: 'amw-warn', text: `${statInvalid} value${statInvalid === 1 ? ' is' : 's are'} not acceptable and will be skipped.` };
     return frame([
       h('div', { key: 'head', className: 'amw-head' },
         h('div', { className: 'amw-title' }, 'Stats'),
@@ -791,7 +1279,6 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     ]);
   }
 
-  const percent = rows.length ? Math.round((unlockedNow / rows.length) * 1000) / 10 : 0;
   const shown = visible.slice(0, limit);
   const fmtDate = t => (t ? new Date(t * 1000).toLocaleString() : '');
   const current = FILTERS.find(f => f[0] === filter);
@@ -805,7 +1292,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     if (row.achieved && row.unlockTime) lines.push('Unlocked ' + fmtDate(row.unlockTime));
     if (isChanged) lines.push(now ? 'Will be unlocked' : 'Will be locked');
     return h('div', { key: row.name, className: 'amw-row ' + (now ? 'amw-row-on' : 'amw-row-off') + (isChanged ? ' amw-row-changed' : '') },
-      row.icon ? h('img', { className: 'amw-rowicon', src: row.icon, alt: '', style: { opacity: now ? 1 : 0.55 } }) : null,
+      h(AchievementIcon, { appId, names: row.iconNames, dim: !now }),
       h('div', { className: 'amw-rowtext' },
         h('div', { className: 'amw-rowtitle' }, row.title),
         lines.length ? h('div', { className: 'amw-rowdesc' }, lines.join('  ·  ')) : null,
@@ -814,13 +1301,6 @@ function ManagerWindow({ appId, gameName, closeModal }) {
         row.isProtected ? h(ProtectedIcon) : null,
         h(API.Toggle, { value: now, disabled: !!row.isProtected, onChange: v => setWanted(row, v) })));
   };
-
-  // one line at the bottom: the question while confirming, otherwise the last result or the number of changes
-  let status = { cls: '', text: changed ? `${changed} change${changed === 1 ? '' : 's'} not saved yet` : '' };
-  if (confirming) status = { cls: 'amw-warn', text: `Unlock ${toUnlock.length}, lock ${toLock.length}? Press Confirm to save to your Steam account.` };
-  else if (working) status = { cls: '', text: 'Saving to your Steam account...' };
-  else if (notice) status = { cls: notice.ok ? 'amw-ok' : 'amw-bad', text: notice.text };
-  else if (!changed && coverage.missing > 0) status = { cls: 'amw-warn', text: coverage.schemaFound ? `${coverage.missing} of ${rows.length} names and icons are missing; their ID is shown.` : 'Steam has not saved this game\'s achievement list yet, so IDs are shown. Reload in a moment.' };
 
   return frame([
     h('div', { key: 'head', className: 'amw-head' },
@@ -1086,6 +1566,11 @@ async function diagnose(appId, names) {
         say(`  listed by Steam for this account: ${st ? 'yes' : 'NO'}`);
         if (st) say(`  state: ${st.achieved ? 'unlocked' + (st.unlock_time ? ' on ' + when(st.unlock_time) : '') : 'locked'}`);
         say(`  share of players: ${Object.prototype.hasOwnProperty.call(shares, name) ? shares[name].toFixed(1) + '%' : 'unknown'}`);
+        if (d) {
+          const urls = iconCandidates(id, st && st.achieved ? [d.icon, d.iconGray] : [d.iconGray || d.icon, d.icon]);
+          say(`  icon values in the schema: icon "${d.icon || ''}", icon_gray "${d.iconGray || ''}"`);
+          say(`  icon addresses tried in order (${urls.length}): ${urls.slice(0, 3).join('  ')}${urls.length > 3 ? '  ...' : ''}`);
+        }
         let verdict;
         if (!st) verdict = 'Steam does not list this achievement for your account, so an unlock request is ignored. Usually DLC you do not own, an archived achievement, or a different version of the game.';
         else if (st.achieved) verdict = 'Already unlocked on your account. If Steam\'s page still shows it locked, refresh the Steam UI.';
@@ -1524,7 +2009,11 @@ const CLASS_DOCS = [
       },
       {
         "selector": ".amw-rowicon",
-        "about": "The achievement icon (an img, 40 x 40)."
+        "about": "The achievement icon (an img, 40 x 40). If an address fails the next one is tried."
+      },
+      {
+        "selector": ".amw-rowicon-none",
+        "about": "The plain tile shown (a div, also .amw-rowicon) when no icon address worked, instead of the browser's broken-image symbol."
       },
       {
         "selector": ".amw-rowtext",
@@ -1641,6 +2130,94 @@ const CLASS_DOCS = [
     ]
   },
   {
+    "group": "Other designs: shared",
+    "blurb": "Window design set to Showcase, Table or Split",
+    "items": [
+      {
+        "selector": ".amw-alt",
+        "about": "Added to .amw-root in every design except Classic, together with .amx-design-showcase, .amx-design-table or .amx-design-split. These designs have no navigation column."
+      },
+      {
+        "selector": ".amx-wrap",
+        "about": "The content of the window (padding and spacing). Also has .amx-showcase, .amx-table or .amx-splitwrap."
+      },
+      {
+        "selector": ".amx-head",
+        "about": "The top row with the game name (.amx-title), the progress line and the Achievements / Stats buttons."
+      },
+      {
+        "selector": ".amx-btn",
+        "about": "Every button of these designs (Steam's DialogButton, so themes style them). Gets .amx-on while it is the open view (Achievements / Stats). .amx-seg holds the two view buttons."
+      },
+      {
+        "selector": ".amx-search",
+        "about": "Wrapper of the search box (Steam's TextField inside, as in Classic). .amx-filter and .amx-sort wrap the two dropdowns."
+      },
+      {
+        "selector": ".amx-foot",
+        "about": "The bottom area: the status line (.amx-status, with the note about changes being applied to the account in .amx-statusnote) above the row of buttons (.amx-bar)."
+      },
+      {
+        "selector": ".amx-check",
+        "about": "A selection circle. Gets .amx-checked when selected."
+      }
+    ]
+  },
+  {
+    "group": "Showcase design",
+    "blurb": "A grid of tiles",
+    "items": [
+      {
+        "selector": ".amx-grid",
+        "about": "The scrolling grid of tiles (also has Steam's .DialogBody)."
+      },
+      {
+        "selector": ".amx-tile",
+        "about": "One achievement or stat. Gets .amx-on / .amx-off, .amx-changed while staged and .amx-protected for protected achievements."
+      },
+      {
+        "selector": ".amx-rarity",
+        "about": "The share-of-players line; .amx-rbar is the track and .amx-rfill the filled part."
+      }
+    ]
+  },
+  {
+    "group": "Table design",
+    "blurb": "Rows with columns and tick boxes",
+    "items": [
+      {
+        "selector": ".amx-trow",
+        "about": "One row of the table; the same class is used for the header row (.amx-hd). Gets .amx-changed while staged and .amx-sel while selected."
+      },
+      {
+        "selector": ".amx-body",
+        "about": "The scrolling rows (also has Steam's .DialogBody)."
+      },
+      {
+        "selector": ".amx-bulk",
+        "about": "The line with Unlock selected / Lock selected / Clear."
+      }
+    ]
+  },
+  {
+    "group": "Split design",
+    "blurb": "A list on the left, a detail pane on the right",
+    "items": [
+      {
+        "selector": ".amx-splitlist",
+        "about": "The left column with the filters, search, sort and the list of rows."
+      },
+      {
+        "selector": ".amx-srow",
+        "about": "One row of the list. Gets .amx-picked while shown in the pane and .amx-changed while a change is staged."
+      },
+      {
+        "selector": ".amx-pane",
+        "about": "The detail pane (also has Steam's .DialogBody). .amx-panehead holds the big icon and title, .amx-tier the rarity tier and .amx-panedesc the description."
+      }
+    ]
+  },
+  {
     "group": "Variables set on .amw-root",
     "blurb": "Custom properties a theme can override",
     "items": [
@@ -1751,7 +2328,12 @@ function SettingsPanel(props) {
   const small = { flex: 'none', width: 'auto', whiteSpace: 'nowrap', padding: '0 14px' };
   const layout = narrow ? 'below' : 'inline';
 
+  const [design, setDesign] = React.useState(readDesign);
+  const chosen = DESIGNS.find(d => d[0] === design) || DESIGNS[0];
   const top = [
+    h(API.Field, { key: 'design', childrenLayout: layout, label: 'Window design', description: chosen[2] + ' Applies the next time the window opens.' },
+      h('div', { style: { minWidth: 200 } },
+        h(API.Dropdown, { rgOptions: DESIGNS.map(d => ({ label: d[1], data: d[0] })), selectedOption: design, onChange: o => { writeDesign(o.data); setDesign(o.data); } }))),
     h(API.Field, { key: 'intro', label: 'Theming Achievement Manager',
       description: 'The window is built from the same parts as Steam\'s game Properties window, so a theme that styles that window styles this one too. To refine it, use the class names below. Click a selector to copy it.' }, null),
     h(API.Field, { key: 'copyall', childrenLayout: layout, label: 'CSS skeleton', description: 'Every selector below with an empty rule and a comment, ready to paste into your theme.' },
