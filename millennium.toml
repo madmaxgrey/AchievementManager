@@ -1,9 +1,9 @@
 [plugin]
 id = "achievement-manager"
 name = "Achievement Manager"
-version = "1.14.0"
+version = "1.15.0"
 author = "madmaxgrey"
-description = "An Achievement Manager tab in the library's achievements window: unlock or lock achievements on your Steam account, using Steam's own controls."
+description = "A button next to View My Achievements that opens a window to unlock or lock achievements and edit stats on your Steam account."
 
 [assets]
 # the helpers are bundled as resources: on Windows the backend writes out and compiles the C# helper on first use, on Linux it runs the Python helper
