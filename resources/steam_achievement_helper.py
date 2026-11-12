@@ -9,6 +9,8 @@
 #   helper stats    <appid> --result-file <file> --args-file <file>     read a game's stats
 #   helper setstats <appid> --result-file <file> --args-file <file>     write stats, store them, read them back
 #
+# Add --silent to any command to work without Steam showing the user as playing the game (see "silent mode" below).
+#
 # Output is JSON, the same as the Windows helper:
 #   status  {"ok":true,"appid":N,"total":N,"achievements":{"API_NAME":{"achieved":bool,"unlock_time":N},...}}
 #   sync    the args file lists "+API_NAME" (unlock), "-API_NAME" (lock) or a bare name (unlock), one per line;
@@ -43,7 +45,7 @@ import os
 import re
 import struct
 import time
-from ctypes import CFUNCTYPE, POINTER, byref, c_bool, c_char_p, c_float, c_int, c_uint32, c_void_p
+from ctypes import CFUNCTYPE, POINTER, byref, c_bool, c_char_p, c_float, c_int, c_uint32, c_uint64, c_void_p
 
 
 # ---------------------------------------------------------------------------------------------- what Steam fixes
@@ -58,6 +60,15 @@ STATS_REQUEST, STATS_SET, STATS_CLEAR, STATS_GET_TIME, STATS_STORE, STATS_COUNT,
 # The stat calls come in int / float pairs. This platform's compiler lays an overloaded pair out in declaration order, so the
 # int version of each pair comes first (on Windows the order is reversed; the helper also checks which slot is which).
 STATS_GET_INT, STATS_GET_FLOAT, STATS_SET_INT, STATS_SET_FLOAT = 1, 2, 3, 4
+
+# Silent mode talks to Steam's client engine instead of the game interface. Its stats object takes the game as the first
+# argument of every call (a game id passed by reference), so the process never announces that it is running a game.
+ENGINE_INTERFACE = b"CLIENTENGINE_INTERFACE_VERSION005"
+ENGINE_CREATE_PIPE, ENGINE_RELEASE_PIPE, ENGINE_CONNECT_USER, ENGINE_RELEASE_USER, ENGINE_RUN_FRAME, ENGINE_GET_STATS = 0, 1, 3, 6, 19, 21
+SILENT_COUNT, SILENT_NAME, SILENT_REQUEST = 3, 4, 5
+SILENT_GET_ACH, SILENT_SET_ACH, SILENT_CLEAR_ACH, SILENT_STORE = 12, 13, 14, 16
+# int / float pairs, in this platform's declaration order (Windows reverses each pair; the helper checks which is which)
+SILENT_GET_INT, SILENT_GET_FLOAT, SILENT_SET_INT, SILENT_SET_FLOAT = 7, 8, 9, 10
 
 CALLBACK_STATS_RECEIVED = 1101
 CALLBACK_STATS_STORED = 1102
@@ -174,6 +185,22 @@ def _slot(iface, index, restype, *argtypes):
     return CFUNCTYPE(restype, c_void_p, *argtypes)(function)
 
 
+def load_steam_library(library_path):
+    """Loads steamclient.so (after its own companions, so that it finds them). Returns (module, None) or (None, (code, detail))."""
+    library_dir = os.path.dirname(os.path.realpath(library_path))
+    for companion in ("libtier0_s.so", "libvstdlib_s.so"):
+        path = os.path.join(library_dir, companion)
+        if os.path.isfile(path):
+            try:
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
+    try:
+        return ctypes.CDLL(library_path), None
+    except OSError as error:
+        return None, ("steam_client_dll_not_found", str(error)[:200])
+
+
 class SteamLink(object):
     """One session with the Steam client: a pipe, the signed-in user and that user's stats interface."""
 
@@ -201,19 +228,9 @@ class SteamLink(object):
     @staticmethod
     def open(library_path, steam_folder):
         """Returns (link, None), or (None, (error code, detail)) when Steam cannot be reached."""
-        # the library's own companions sit next to it; load them first so that it finds them
-        library_dir = os.path.dirname(os.path.realpath(library_path))
-        for companion in ("libtier0_s.so", "libvstdlib_s.so"):
-            path = os.path.join(library_dir, companion)
-            if os.path.isfile(path):
-                try:
-                    ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
-                except OSError:
-                    pass
-        try:
-            module = ctypes.CDLL(library_path)
-        except OSError as error:
-            return None, ("steam_client_dll_not_found", str(error)[:200])
+        module, problem = load_steam_library(library_path)
+        if module is None:
+            return None, problem
         return SteamLink.from_module(module)
 
     @staticmethod
@@ -358,6 +375,10 @@ class SteamLink(object):
         known = bool(self._get_time(self.stats, name.encode("utf-8"), byref(achieved), byref(when)))
         return known, bool(achieved.value), int(when.value)
 
+    def _pump(self):
+        """Called before callbacks are collected; the silent connection overrides it."""
+        return None
+
     def wait_for_callback(self, callback_id, app_id, seconds):
         """Steam answers a request with a callback that carries the game id (first 8 bytes) and a result code (the next 4).
         Waits up to `seconds` for callback `callback_id` about `app_id`; returns (whether it came, the result code)."""
@@ -365,6 +386,7 @@ class SteamLink(object):
         seen = False
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            self._pump()
             message = CallbackMsg()
             call = c_int(0)
             while self._next_callback(self.pipe, byref(message), byref(call)):
@@ -380,6 +402,121 @@ class SteamLink(object):
         return False, result
 
 
+class SilentLink(SteamLink):
+    """The same session as SteamLink, made through Steam's client engine so that Steam is never told a game is running.
+    Every stats call carries the game id; the calls are wrapped here so that the rest of the program uses the same methods."""
+
+    def __init__(self):
+        SteamLink.__init__(self)
+        self.game = c_uint64(0)
+        self._run_frame = None
+        self._raw = {}
+
+    @staticmethod
+    def open(library_path, steam_folder, app_id):
+        module, problem = load_steam_library(library_path)
+        if module is None:
+            return None, problem
+        return SilentLink.from_module(module, app_id)
+
+    @staticmethod
+    def from_module(module, app_id):
+        try:
+            create_interface = module.CreateInterface
+            create_interface.restype = c_void_p
+            create_interface.argtypes = [c_char_p, POINTER(c_int)]
+        except AttributeError:
+            return None, ("create_interface_not_found", None)
+
+        link = SilentLink()
+        try:
+            link._next_callback = module.Steam_BGetCallback
+            link._next_callback.restype = c_bool
+            link._next_callback.argtypes = [c_int, POINTER(CallbackMsg), POINTER(c_int)]
+            link._free_callback = module.Steam_FreeLastCallback
+            link._free_callback.restype = None
+            link._free_callback.argtypes = [c_int]
+        except AttributeError:
+            return None, ("callbacks_not_available", None)
+
+        link.game = c_uint64(app_id & 0xFFFFFF)
+        code = c_int(0)
+        link.client = create_interface(ENGINE_INTERFACE, byref(code))
+        if not link.client:
+            return None, ("silent_unavailable", "client engine not available")
+
+        create_pipe = _slot(link.client, ENGINE_CREATE_PIPE, c_int)
+        connect_user = _slot(link.client, ENGINE_CONNECT_USER, c_int, c_int)
+        get_stats = _slot(link.client, ENGINE_GET_STATS, c_void_p, c_int, c_int, c_char_p)
+        link._release_pipe = _slot(link.client, ENGINE_RELEASE_PIPE, c_bool, c_int)
+        link._release_user = _slot(link.client, ENGINE_RELEASE_USER, None, c_int, c_int)
+        link._run_frame = _slot(link.client, ENGINE_RUN_FRAME, None)
+        if not create_pipe or not connect_user or not get_stats or not link._run_frame:
+            return None, ("silent_unavailable", "client engine slots")
+
+        link.pipe = create_pipe(link.client)
+        if link.pipe == 0:
+            return None, ("steam_not_running", None)
+
+        link.user = connect_user(link.client, link.pipe)
+        if link.user == 0:
+            link.close()
+            if someone_is_signed_in():
+                return None, ("silent_unavailable", "could not connect to the signed-in user")
+            return None, ("steam_user_not_logged_in", None)
+
+        # no interface version is asked for: the engine hands out its own stats object
+        link.stats = get_stats(link.client, link.user, link.pipe, None)
+        if not link.stats:
+            link.close()
+            return None, ("silent_unavailable", "client stats interface")
+
+        game = POINTER(c_uint64)
+        stats = link.stats
+        slots = {
+            "request": _slot(stats, SILENT_REQUEST, c_bool, game),
+            "count": _slot(stats, SILENT_COUNT, c_uint32, game),
+            "name": _slot(stats, SILENT_NAME, c_char_p, game, c_uint32),
+            "get_time": _slot(stats, SILENT_GET_ACH, c_bool, game, c_char_p, POINTER(c_bool), POINTER(c_uint32)),
+            "set": _slot(stats, SILENT_SET_ACH, c_bool, game, c_char_p),
+            "clear": _slot(stats, SILENT_CLEAR_ACH, c_bool, game, c_char_p),
+            "store": _slot(stats, SILENT_STORE, c_bool, game),
+        }
+        if not all(slots.values()):
+            link.close()
+            return None, ("silent_unavailable", "client stats slots")
+        link._raw = slots
+        ref = lambda: byref(link.game)
+        link._request = lambda this: slots["request"](this, ref())
+        link._count = lambda this: slots["count"](this, ref())
+        link._name_at = lambda this, index: slots["name"](this, ref(), index)
+        link._get_time = lambda this, name, achieved, when: slots["get_time"](this, ref(), name, achieved, when)
+        link._set = lambda this, name: slots["set"](this, ref(), name)
+        link._clear = lambda this, name: slots["clear"](this, ref(), name)
+        link._store = lambda this: slots["store"](this, ref())
+        link.bind_stat_calls(False)
+        return link, None
+
+    def bind_stat_calls(self, swapped):
+        order = (SILENT_GET_FLOAT, SILENT_GET_INT, SILENT_SET_FLOAT, SILENT_SET_INT) if swapped else (SILENT_GET_INT, SILENT_GET_FLOAT, SILENT_SET_INT, SILENT_SET_FLOAT)
+        game = POINTER(c_uint64)
+        stats = self.stats
+        raw_get_int = _slot(stats, order[0], c_bool, game, c_char_p, POINTER(c_int))
+        raw_get_float = _slot(stats, order[1], c_bool, game, c_char_p, POINTER(c_float))
+        raw_set_int = _slot(stats, order[2], c_bool, game, c_char_p, c_int)
+        raw_set_float = _slot(stats, order[3], c_bool, game, c_char_p, c_float)
+        ref = lambda: byref(self.game)
+        self._get_int = (lambda this, name, out: raw_get_int(this, ref(), name, out)) if raw_get_int else None
+        self._get_float = (lambda this, name, out: raw_get_float(this, ref(), name, out)) if raw_get_float else None
+        self._set_int = (lambda this, name, value: raw_set_int(this, ref(), name, value)) if raw_set_int else None
+        self._set_float = (lambda this, name, value: raw_set_float(this, ref(), name, value)) if raw_set_float else None
+
+    def _pump(self):
+        # the client engine only delivers callbacks while it is being run
+        if self._run_frame:
+            self._run_frame(self.client)
+
+
 # ---------------------------------------------------------------------------------------------- command line
 class Options(object):
     def __init__(self):
@@ -387,6 +524,7 @@ class Options(object):
         self.app_id = 0
         self.result_file = ""
         self.steam_path = ""
+        self.silent = False
         self.entries = []
         self.problem = ""     # an error code when the command line cannot be used
 
@@ -400,6 +538,8 @@ class Options(object):
             if arg == "--result-file" and i + 1 < len(argv):
                 i += 1
                 options.result_file = argv[i]
+            elif arg == "--silent":
+                options.silent = True
             elif arg == "--steam-path" and i + 1 < len(argv):
                 i += 1
                 options.steam_path = argv[i]
@@ -451,7 +591,7 @@ def wait_for_schema(steam_folder, app_id):
         time.sleep(0.15)
 
 
-def report_status(link, app_id):
+def report_status(link, app_id, silent=False):
     total = link.achievement_count()
     achievements = {}
     for index in range(total):
@@ -460,10 +600,17 @@ def report_status(link, app_id):
             continue
         known, achieved, when = link.read_achievement(name)
         achievements[name] = {"achieved": achieved, "unlock_time": when}
-    Report.write({"ok": True, "appid": app_id, "total": total, "achievements": achievements})
+    payload = {"ok": True, "appid": app_id, "total": total, "achievements": achievements}
+    if silent:
+        payload["silent"] = True
+        if total > 0 and not achievements:
+            # Steam counted achievements but gave no names: this route cannot list them on this system
+            Report.fail("silent_unavailable", "achievement names")
+            return
+    Report.write(payload)
 
 
-def report_sync(link, app_id, entries):
+def report_sync(link, app_id, entries, silent=False):
     to_unlock = []
     to_lock = []
     for entry in entries:
@@ -491,11 +638,19 @@ def report_sync(link, app_id, entries):
     # Steam confirms the save with callback 1102
     came, result = link.wait_for_callback(CALLBACK_STATS_STORED, app_id, 4)
     callback_confirmed = came and result == RESULT_OK
+    read_back = False
+    if silent and stored and not callback_confirmed:
+        # the silent route may not deliver the callback: accept the save when Steam now reports every change
+        read_back = all(link.read_achievement(n)[1] for n in to_unlock) and not any(link.read_achievement(n)[1] for n in to_lock)
+        callback_confirmed = read_back
     committed = stored and callback_confirmed
 
     payload = {"ok": committed, "appid": app_id, "unlocked_count": unlocked, "locked_count": locked,
                "requested_unlock": len(to_unlock), "requested_lock": len(to_lock),
                "stored": stored, "callback_confirmed": callback_confirmed}
+    if silent:
+        payload["silent"] = True
+        payload["confirmed_by_read_back"] = read_back
     if not committed:
         payload["error"] = "store_stats_not_confirmed"
     Report.write(payload)
@@ -559,7 +714,7 @@ def stat_number(kind, text):
         return None
 
 
-def report_setstats(link, app_id, entries):
+def report_setstats(link, app_id, entries, silent=False):
     detect_stat_order(link, entries)
     refused = []
     wanted = []
@@ -575,6 +730,9 @@ def report_setstats(link, app_id, entries):
     if stored:
         came, result = link.wait_for_callback(CALLBACK_STATS_STORED, app_id, 5)
         confirmed = came and result == RESULT_OK
+        if silent and not confirmed:
+            # the silent route may not deliver the callback: the values are compared with what Steam holds further down
+            confirmed = all(link.read_stat(kind, name)[0] for kind, name, number in wanted)
 
     # ask Steam for the stats again, then compare what it now holds with what was asked for
     from_server = False
@@ -599,6 +757,8 @@ def report_setstats(link, app_id, entries):
     committed = stored and confirmed
     payload = {"ok": committed, "appid": app_id, "requested": len(entries), "changed": changed, "stored": stored,
                "callback_confirmed": confirmed, "verified_from_server": from_server, "not_changed": refused, "stats": after}
+    if silent:
+        payload["silent"] = True
     if not committed:
         payload["error"] = "store_stats_not_confirmed"
     Report.write(payload)
@@ -616,16 +776,24 @@ def main(argv):
             Report.fail("unsupported_platform", sys.platform)
             return
 
-        # Steam decides which game the connection belongs to from these two variables, so they are set before its library loads
-        os.environ["SteamAppId"] = str(options.app_id)
-        os.environ["SteamGameId"] = str(options.app_id)
+        if options.silent:
+            # silent mode must not announce a game: make sure neither variable is present
+            os.environ.pop("SteamAppId", None)
+            os.environ.pop("SteamGameId", None)
+        else:
+            # Steam decides which game the connection belongs to from these two variables, so they are set before its library loads
+            os.environ["SteamAppId"] = str(options.app_id)
+            os.environ["SteamGameId"] = str(options.app_id)
 
         steam_folder, library = find_steam(options.steam_path)
         if not library:
             Report.fail("steam_client_dll_not_found")
             return
 
-        link, problem = SteamLink.open(library, steam_folder)
+        if options.silent:
+            link, problem = SilentLink.open(library, steam_folder, options.app_id)
+        else:
+            link, problem = SteamLink.open(library, steam_folder)
         if link is None:
             code, detail = problem
             if code == "steam_game_refused":
@@ -634,7 +802,15 @@ def main(argv):
             return
 
         try:
-            if not link.request_stats():
+            requested = link.request_stats()
+            tries = 1
+            while not requested and options.silent and tries < 3:
+                # right after connecting, the silent route can refuse the first request
+                time.sleep(0.4)
+                link._pump()
+                requested = link.request_stats()
+                tries += 1
+            if not requested:
                 Report.fail("request_current_stats_failed")
                 return
             came, answer = link.wait_for_callback(CALLBACK_STATS_RECEIVED, options.app_id, 8)
@@ -644,9 +820,9 @@ def main(argv):
 
             if options.command == "status":
                 wait_for_schema(steam_folder, options.app_id)
-                report_status(link, options.app_id)
+                report_status(link, options.app_id, options.silent)
             elif options.command == "sync":
-                report_sync(link, options.app_id, options.entries)
+                report_sync(link, options.app_id, options.entries, options.silent)
             else:
                 entries = [e for e in (parse_stat_entry(w, options.command == "setstats") for w in options.entries) if e]
                 if not entries:
@@ -655,7 +831,7 @@ def main(argv):
                 if options.command == "stats":
                     report_stats(link, options.app_id, entries)
                 else:
-                    report_setstats(link, options.app_id, entries)
+                    report_setstats(link, options.app_id, entries, options.silent)
         finally:
             link.close()
     except Exception as error:

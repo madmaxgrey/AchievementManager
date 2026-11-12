@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.14.0. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
+/* Achievement Manager 1.15.0. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
 import { definePlugin, Field } from 'millennium';
 
 const React = (window as any).SP_REACT;
@@ -329,7 +329,9 @@ const PAGE = 150;
 
 async function callBackend(method, payload) {
   // the compiler turns literal `backend.<name>(...)` calls into calls to the Lua functions, so each is written out
-  const arg = JSON.stringify(payload);
+  // silent mode (a setting) travels with every request; the backend hands it to the helper
+  const body = payload && typeof payload === 'object' ? Object.assign({}, payload, { silent: readSilent() }) : payload;
+  const arg = JSON.stringify(body);
   let raw;
   if (method === 'am_apply') raw = await backend.am_apply(arg);
   else if (method === 'am_stats') raw = await backend.am_stats(arg);
@@ -357,10 +359,11 @@ const ERRORS = {
   empty_output: 'The helper gave no answer (it may have timed out).',
   busy: 'Another request is still running. Try again in a moment.',
   store_stats_not_confirmed: 'Steam did not confirm that the changes were saved.',
+  silent_unavailable: 'Silent mode could not start on this system. Turn off "Silent mode" in the plugin settings to use the normal way, which shows you as playing the game while the window works.',
+  silent_compilation_failed: 'The silent mode helper program could not be built. Turn off "Silent mode" in the plugin settings to use the normal way.',
   invalid_appid: 'This game has no usable app ID.',
   nothing_to_apply: 'There was nothing to write.',
   stats_unavailable: 'Stats can only be edited on Windows and Linux.',
-  stats_compilation_failed: 'The stats helper program could not be built.',
   stats_failed: 'The stats helper could not run.',
 };
 const explain = res => {
@@ -372,7 +375,7 @@ const explain = res => {
 
 
 // Steam's logo, as a 24x24 SVG path (drawn in the loading screen)
-const PLUGIN_VERSION = '1.14.0';   // keep in step with millennium.toml; shown in diagnose() reports
+const PLUGIN_VERSION = '1.15.0';   // keep in step with millennium.toml; shown in diagnose() reports
 
 const STEAM_LOGO = 'M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z';
 
@@ -518,6 +521,15 @@ function readDesign() {
 }
 function writeDesign(id) {
   try { window.localStorage.setItem(DESIGN_KEY, id); } catch (e) { /* storage unavailable */ }
+}
+
+// Silent mode: work without Steam showing the user as playing the game (off unless switched on in the plugin settings)
+const SILENT_KEY = 'achievement-manager.silent';
+function readSilent() {
+  try { return window.localStorage.getItem(SILENT_KEY) === '1'; } catch (e) { return false; }
+}
+function writeSilent(on) {
+  try { window.localStorage.setItem(SILENT_KEY, on ? '1' : '0'); } catch (e) { /* storage unavailable */ }
 }
 
 // extra rules for the three new designs; they sit on top of the shared CSS above and use only text-colour mixes
@@ -1069,6 +1081,7 @@ function ManagerWindow({ appId, gameName, closeModal }) {
     if (res && res.ok) {
       const text = `Saved: ${res.unlocked_count || 0} unlocked, ${res.locked_count || 0} locked.`;
       await load();
+      await refreshSteamGameAchievements(appId);
       if (alive.current) setNotice({ ok: true, text });
     } else {
       setNotice({ ok: false, text: explain(res) });
@@ -1493,6 +1506,58 @@ function findLooseAnchor(doc) {
 //   copy((await __achievementManager.diagnose(863550, 'Title or ACH_NAME')).join('\n'))   plus a verdict for one or more achievements (title or API name)
 // Read-only. It runs the status helper once (Steam may show you as in-game for a moment) and compares what the game's schema,
 // Steam's own list for your account and Steam's public numbers say. Returns the report as an array of lines.
+// Refresh only Steam's game-page achievement query; the summary and status queries derive from its updated timestamp.
+async function refreshSteamGameAchievements(appId) {
+  try {
+    const lib = libraryWindow();
+    const doc = lib && lib.win && lib.win.document;
+    if (!doc) return false;
+
+    const seen = new Set();
+    let client;
+    for (const el of doc.querySelectorAll('*')) {
+      const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+      if (!key) continue;
+      let fiber = el[key];
+      while (fiber && !seen.has(fiber)) {
+        seen.add(fiber);
+        const candidate = fiber.memoizedProps && fiber.memoizedProps.client;
+        if (candidate && typeof candidate.getQueryCache === 'function') {
+          client = candidate;
+          break;
+        }
+        fiber = fiber.return;
+      }
+      if (client) break;
+    }
+
+    if (!client) {
+      console.warn('[Achievement Manager] Steam game-page query client was not found');
+      return false;
+    }
+
+    const id = Number(appId);
+    const queries = client.getQueryCache().getAll().filter(query => {
+      const key = query.queryKey;
+      return key && key[0] === 'achievements' && key[1] === id && key[2] === 'user_achievements';
+    });
+    const query = queries.find(item => typeof item.getObserversCount === 'function' && item.getObserversCount() > 0) ||
+      queries.sort((a, b) => b.state.dataUpdatedAt - a.state.dataUpdatedAt)[0];
+
+    if (!query) {
+      console.warn('[Achievement Manager] Steam has no cached user-achievements query for app', id);
+      return false;
+    }
+
+    await query.fetch();
+    console.info('[Achievement Manager] refreshed Steam game-page achievement data for app', id);
+    return true;
+  } catch (e) {
+    console.warn('[Achievement Manager] could not refresh Steam game-page achievement data', e);
+    return false;
+  }
+}
+
 async function diagnose(appId, names) {
   const out = [];
   const say = t => out.push(String(t));
@@ -1511,6 +1576,7 @@ async function diagnose(appId, names) {
       gameName = (overview && (overview.display_name || overview.name)) || '';
     } catch (e) { gameName = ''; }
     say('app: ' + id + (gameName ? ' (' + gameName + ')' : ''));
+    say('silent mode: ' + (readSilent() ? 'on' : 'off'));
 
     let res;
     try { res = await callBackend('am_status', { steam_app_id: id }); }
@@ -2329,11 +2395,15 @@ function SettingsPanel(props) {
   const layout = narrow ? 'below' : 'inline';
 
   const [design, setDesign] = React.useState(readDesign);
+  const [silent, setSilent] = React.useState(readSilent);
   const chosen = DESIGNS.find(d => d[0] === design) || DESIGNS[0];
   const top = [
     h(API.Field, { key: 'design', childrenLayout: layout, label: 'Window design', description: chosen[2] + ' Applies the next time the window opens.' },
       h('div', { style: { minWidth: 200 } },
         h(API.Dropdown, { rgOptions: DESIGNS.map(d => ({ label: d[1], data: d[0] })), selectedOption: design, onChange: o => { writeDesign(o.data); setDesign(o.data); } }))),
+    h(API.Field, { key: 'silent', childrenLayout: layout, label: 'Silent mode',
+      description: 'Unlock, lock and edit stats without Steam showing you as playing the game to your friends. It talks to Steam\'s client engine instead of opening the game the normal way. If it does not work for a game, turn it off.' },
+      h(API.Toggle, { value: silent, onChange: v => { writeSilent(!!v); setSilent(!!v); } })),
     h(API.Field, { key: 'intro', label: 'Theming Achievement Manager',
       description: 'The window is built from the same parts as Steam\'s game Properties window, so a theme that styles that window styles this one too. To refine it, use the class names below. Click a selector to copy it.' }, null),
     h(API.Field, { key: 'copyall', childrenLayout: layout, label: 'CSS skeleton', description: 'Every selector below with an empty rule and a comment, ready to paste into your theme.' },

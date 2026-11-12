@@ -8,7 +8,9 @@ A [Millennium](https://steambrew.app) plugin that adds an **Achievement Manager*
 - a **Stats** view for the game's numeric stats (kills, distance and the like): change a value and press Apply; Steam's own limits for each stat apply
 - *Unlock shown* / *Lock shown* for whatever the search and filter currently show
 - four **window designs** to pick from in the plugin's settings (**Window design**): Classic, Showcase (a tile grid), Table (selection boxes for bulk changes) and Split (a list with a large detail pane). The choice applies the next time the window opens
+- **Silent mode** (off by default, switch it on in the plugin settings): unlocks, locks and stat edits are made without Steam showing you as playing the game to your friends. If it does not work for a game, turn it off to use the normal way
 - changes are **staged** first; **Apply** asks for a confirmation, then writes them to your Steam account and waits for Steam to confirm the save
+- after a successful Apply, the plugin refreshes Steam’s cached achievement data for that game page, so re-locked achievements update without restarting or reloading the Steam UI
 
 
 ## Install
@@ -59,13 +61,13 @@ bun run build     # packs achievement-manager.star and installs it into Millenni
 ## Files
 
 ```
-millennium.toml                      manifest (plugin id, backend, frontend, resources)
-backend/main.lua                     load / unload hooks
-backend/rpc_functions.lua            am_status / am_apply, helper build + launch
-resources/steam_achievement_helper.cs   the Windows Steam client helper (bundled, compiled on first use)
-resources/steam_stats_helper.cs         the Windows helper for stats (bundled, compiled on first use of the Stats view)
-resources/steam_achievement_helper.py   the Linux Steam client helper, achievements and stats (bundled, run with python3)
-frontend/index.tsx                   button injection, the manager window and the Steam stats schema reader
+millennium.toml                         manifest (plugin id, backend, frontend, resources)
+backend/main.lua                        load / unload hooks
+backend/rpc_functions.lua               am_status / am_apply, helper build + launch
+resources/steam_achievement_helper.cs   the Windows Steam client helper for achievements and stats (bundled, compiled on first use)
+resources/steam_silent_helper.cs        the Windows helper for Silent mode (bundled, compiled on first use of Silent mode)
+resources/steam_achievement_helper.py   the Linux Steam client helper, achievements, stats and Silent mode (bundled, run with python3)
+frontend/index.tsx                      button injection, the manager window and the Steam stats schema reader
 ```
 
 ## License

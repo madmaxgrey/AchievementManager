@@ -325,7 +325,9 @@ local sequence = 0     -- makes temp file names unique
 local busy = false    -- one request at a time
 
 -- Runs the helper with `arguments` such as "status 220" and returns the JSON text it wrote.
-local function run_helper(arguments, arg_lines)
+-- `silent` adds --silent: the helper then works without Steam showing the user as playing the game.
+local function run_helper(arguments, arg_lines, silent)
+    if silent then arguments = arguments .. " --silent" end
     if PLATFORM == "linux" then
         sequence = (sequence + 1) % 1000000
         return run_helper_linux(arguments, arg_lines, steam_path(), tostring(os.time()) .. "_" .. tostring(sequence))
@@ -333,12 +335,13 @@ local function run_helper(arguments, arg_lines)
         return nil, "unsupported_platform", tostring(jit and jit.os or "unknown")
     end
 
-    -- the stats helper is a separate program, built only when stats are asked for, so a problem with it never touches achievements
     local exe, why
-    if arguments:match("^stats") or arguments:match("^setstats") then
-        exe, why = helper_exe("resources/steam_stats_helper.cs", "achievement_manager_stats_", "stats_compilation_failed")
+    if silent then
+        -- silent mode is its own program, so a problem with it never touches the normal helper
+        exe, why = helper_exe("resources/steam_silent_helper.cs", "achievement_manager_silent_", "silent_compilation_failed")
     else
-        exe, why = helper_exe()
+        -- one program for achievements and stats
+        exe, why = helper_exe("resources/steam_achievement_helper.cs", "achievement_manager_helper_", "compilation_failed")
     end
     if not exe then return nil, why end
 
@@ -371,7 +374,7 @@ local function run_helper(arguments, arg_lines)
     return output
 end
 
--- Turns whatever the frontend sent (an app id, a JSON string, or a table) into { steam_app_id, unlock, lock, stats, set }.
+-- Turns whatever the frontend sent (an app id, a JSON string, or a table) into { steam_app_id, unlock, lock, stats, set, silent }.
 local function parse_request(request)
     if type(request) == "string" then
         local trimmed = request:match("^%s*(.-)%s*$") or ""
@@ -388,6 +391,7 @@ local function parse_request(request)
             lock = request.lock,
             stats = request.stats,
             set = request.set,
+            silent = request.silent == true or request.silent == "true" or request.silent == 1,
         }
     end
     return {}
@@ -457,7 +461,7 @@ function am_status(request)
         local id = data.steam_app_id
         if not valid_appid(id) then return fail("invalid_appid") end
 
-        local raw, err, detail = run_helper("status " .. id)
+        local raw, err, detail = run_helper("status " .. id, nil, data.silent)
         if not raw then return fail(err or "status_failed", detail) end
 
         local decoded_ok, decoded = pcall(json.decode, raw)
@@ -499,7 +503,7 @@ function am_apply(request)
         end
         if #lines == 0 then return fail("nothing_to_apply") end
 
-        local raw, err, detail = run_helper("sync " .. id, lines)
+        local raw, err, detail = run_helper("sync " .. id, lines, data.silent)
         if not raw then return fail(err or "sync_failed", detail) end
         local decoded_ok, decoded = pcall(json.decode, raw)
         if not decoded_ok or type(decoded) ~= "table" then return fail("json_parse_failed", raw:sub(1, 200)) end
@@ -548,7 +552,7 @@ function am_stats(request)
         local lines = stat_lines(data.stats, false)
         if #lines == 0 then return fail("nothing_to_apply") end
 
-        local raw, err, detail = run_helper("stats " .. id, lines)
+        local raw, err, detail = run_helper("stats " .. id, lines, data.silent)
         if not raw then return fail(err or "stats_failed", detail) end
         return raw
     end)
@@ -567,7 +571,7 @@ function am_stats_apply(request)
         local lines = stat_lines(data.set, true)
         if #lines == 0 then return fail("nothing_to_apply") end
 
-        local raw, err, detail = run_helper("setstats " .. id, lines)
+        local raw, err, detail = run_helper("setstats " .. id, lines, data.silent)
         if not raw then return fail(err or "stats_failed", detail) end
         logger:info(string.format("Achievement Manager: app %s, %d stat(s) written", id, #lines))
         return raw
