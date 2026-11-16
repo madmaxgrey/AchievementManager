@@ -1,7 +1,7 @@
 [plugin]
 id = "achievement-manager"
 name = "Achievement Manager"
-version = "1.15.0"
+version = "1.15.1"
 author = "madmaxgrey"
 description = "A button next to View My Achievements that opens a window to unlock or lock achievements and edit stats on your Steam account."
 
