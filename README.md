@@ -25,7 +25,7 @@ Grab `achievement-manager.star` from the [Releases](https://github.com/madmaxgre
 ## Notes
 
 > [!IMPORTANT]
-> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed.
+> **Windows and Linux.** The plugin detects the system and picks its helper. On Linux the helper is a Python script, so `python3` (3.6 or newer) must be installed on your system. Steam's newer 64-bit Linux client runs inside a container that has no Python of its own; the plugin then starts the helper on your system through Steam's launcher (`steam-runtime-launch-client --host`), so the system `python3` is still the one used.
 
 - It sits next to *View My Achievements* on the game page. If that button is not there, the plugin adds its own button to the achievements section instead.
 - Achievement names are shown in Steam's current language when the game's schema has it, English otherwise.
@@ -61,13 +61,12 @@ bun run build     # packs achievement-manager.star and installs it into Millenni
 ## Files
 
 ```
-millennium.toml                         manifest (plugin id, backend, frontend, resources)
-backend/main.lua                        load / unload hooks
-backend/rpc_functions.lua               am_status / am_apply, helper build + launch
+millennium.toml                      manifest (plugin id, backend, frontend, resources)
+backend/main.lua                     load / unload hooks
+backend/rpc_functions.lua            am_status / am_apply, helper build + launch
 resources/steam_achievement_helper.cs   the Windows Steam client helper for achievements and stats (bundled, compiled on first use)
-resources/steam_silent_helper.cs        the Windows helper for Silent mode (bundled, compiled on first use of Silent mode)
-resources/steam_achievement_helper.py   the Linux Steam client helper, achievements, stats and Silent mode (bundled, run with python3)
-frontend/index.tsx                      button injection, the manager window and the Steam stats schema reader
+resources/steam_achievement_helper.py   the Linux Steam client helper, achievements and stats (bundled, run with python3)
+frontend/index.tsx                   button injection, the manager window and the Steam stats schema reader
 ```
 
 ## License

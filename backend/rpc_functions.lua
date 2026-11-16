@@ -275,18 +275,48 @@ local function tidy(text, limit)
     return ((text or ""):gsub("[%c]+", " | "):gsub("%s+", " "):sub(1, limit))
 end
 
+-- Steam's Linux client now runs inside a Steam Runtime container, which has no python3 of its own. Valve's launcher client
+-- can start a command on the host system instead ("steam-runtime-launch-client --host", like flatpak-spawn --host).
+local function find_launch_client(steam)
+    local candidates = {}
+    local ok, pipe = pcall(io.popen, "command -v steam-runtime-launch-client 2>/dev/null")
+    if ok and pipe then
+        local found = pipe:read("*l")
+        pipe:close()
+        if found and found:sub(1, 1) == "/" then candidates[#candidates + 1] = found end
+    end
+    candidates[#candidates + 1] = "/usr/bin/steam-runtime-launch-client"
+    if steam then
+        candidates[#candidates + 1] = steam .. "/ubuntu12_64/steam-runtime/usr/bin/steam-runtime-launch-client"
+        candidates[#candidates + 1] = steam .. "/ubuntu12_32/steam-runtime/usr/bin/steam-runtime-launch-client"
+    end
+    for _, candidate in ipairs(candidates) do
+        if file_exists(candidate) then return candidate end
+    end
+    return nil
+end
+
+-- Runs one command line; Python's output and the exit status go to a log, which is returned with the helper's result file.
+local function run_command(command, result_path, log_path)
+    pcall(os.remove, result_path)
+    pcall(os.execute, command .. " > " .. shell_quote(log_path) .. " 2>&1; echo \"exit status $?\" >> " .. shell_quote(log_path))
+    local output = read_all(result_path)
+    local log = read_all(log_path)
+    pcall(os.remove, result_path)
+    pcall(os.remove, log_path)
+    if output and output ~= "" then return output, log end
+    return nil, log
+end
+
 -- The Linux half of run_helper: returns the helper's JSON text, or nil plus an error code and detail.
 local function run_helper_linux(arguments, arg_lines, steam, sequence_stamp)
     local dir = linux_work_dir()
     if not dir then return nil, "helper_write_failed", "no home folder" end
-    local python = find_python()
-    if not python then return nil, "python_not_found" end
     local script, why, detail = linux_helper_script(dir)
     if not script then return nil, why, detail end
 
     local result_path = string.format("%s/result_%s.json", dir, sequence_stamp)
     local log_path = string.format("%s/run_%s.log", dir, sequence_stamp)
-    pcall(os.remove, result_path)
 
     local args_path = nil
     if arg_lines and #arg_lines > 0 then
@@ -302,23 +332,26 @@ local function run_helper_linux(arguments, arg_lines, steam, sequence_stamp)
     if steam then env = env .. " LD_LIBRARY_PATH=" .. shell_quote(steam .. "/linux64")
     else env = env .. " -u LD_LIBRARY_PATH" end
 
-    local command = string.format("%s timeout 25 %s %s %s --result-file %s", env, shell_quote(python), shell_quote(script), arguments, shell_quote(result_path))
-    if steam then command = command .. " --steam-path " .. shell_quote(steam) end
-    if args_path then command = command .. " --args-file " .. shell_quote(args_path) end
-    -- Python's output and the exit status go to a log, which is shown if the helper writes no result.
-    command = command .. " > " .. shell_quote(log_path) .. " 2>&1; echo \"exit status $?\" >> " .. shell_quote(log_path)
+    local tail = string.format(" %s --result-file %s", arguments, shell_quote(result_path))
+    if steam then tail = tail .. " --steam-path " .. shell_quote(steam) end
+    if args_path then tail = tail .. " --args-file " .. shell_quote(args_path) end
 
-    pcall(os.execute, command)
-
-    local output = read_all(result_path)
-    local log = read_all(log_path)
-    pcall(os.remove, result_path)
-    pcall(os.remove, log_path)
-    if args_path then pcall(os.remove, args_path) end
-    if not output or output == "" then
-        return nil, "helper_failed", (log and log ~= "") and tidy(log, 400) or nil
+    local output, log, host_log
+    local python = find_python()
+    if python then
+        output, log = run_command(string.format("%s timeout 25 %s %s%s", env, shell_quote(python), shell_quote(script), tail), result_path, log_path)
     end
-    return output
+    local launch = (not output) and find_launch_client(steam) or nil
+    if launch then
+        -- same helper, started on the host system through Steam's launcher
+        output, host_log = run_command(string.format("timeout 25 %s --host -- /usr/bin/%s python3 %s%s", shell_quote(launch), env, shell_quote(script), tail), result_path, log_path)
+    end
+    if args_path then pcall(os.remove, args_path) end
+
+    if output then return output end
+    if launch then return nil, "helper_failed", "on the host: " .. tidy(host_log or "", 360) end
+    if python then return nil, "helper_failed", (log and log ~= "") and tidy(log, 400) or nil end
+    return nil, "python_not_found", "no python3 here and steam-runtime-launch-client was not found"
 end
 
 local sequence = 0     -- makes temp file names unique
@@ -576,6 +609,55 @@ function am_stats_apply(request)
         logger:info(string.format("Achievement Manager: app %s, %d stat(s) written", id, #lines))
         return raw
     end)
+end
+
+-- Linux only, read-only report on how this Steam runs (container or not), where python3 is, and whether Steam's launcher client
+-- can reach the host. Frontend: __achievementManager.linuxProbe(). It only reads, plus one small test file in the work folder.
+local function probe_capture(command)
+    local ok, pipe = pcall(io.popen, "timeout 12 " .. command .. " 2>&1; echo \"[exit $?]\"")
+    if not ok or not pipe then return "(could not run)" end
+    local text = pipe:read("*a") or ""
+    pipe:close()
+    return tidy(text, 300)
+end
+
+---@ffi
+---@param request string
+---@return string
+function am_linux_probe(request)
+    if PLATFORM ~= "linux" then return '{"ok":true,"text":"not Linux, nothing to report"}' end
+    local lines = {}
+    local function say(t) lines[#lines + 1] = t end
+    local steam = steam_path()
+    say("platform: linux; steam path: " .. tostring(steam))
+    say("HOME " .. tostring(os.getenv("HOME")) .. "; XDG_CACHE_HOME " .. tostring(os.getenv("XDG_CACHE_HOME")))
+    say("PATH " .. tostring(os.getenv("PATH")):sub(1, 300))
+    say("container var: " .. tostring(os.getenv("container")) .. "; /run/host: " .. tostring(file_exists("/run/host/usr/bin/env") or file_exists("/run/host/os-release")) ..
+        "; flatpak: " .. tostring(file_exists("/.flatpak-info")) .. "; pressure-vessel marker: " .. tostring(file_exists("/run/pressure-vessel") or file_exists("/usr/lib/pressure-vessel")))
+    say("os-release here: " .. probe_capture("head -n 3 /etc/os-release"))
+    say("steamclient.so (64-bit) present: " .. tostring(steam and file_exists(steam .. "/linux64/steamclient.so") or false))
+    local python = find_python()
+    say("python3 found here: " .. tostring(python))
+    local launch = find_launch_client(steam)
+    say("steam-runtime-launch-client: " .. tostring(launch))
+    local dir = linux_work_dir()
+    say("work folder: " .. tostring(dir))
+    if launch then
+        say("launcher services: " .. probe_capture(shell_quote(launch) .. " --list"))
+        say("host uname: " .. probe_capture(shell_quote(launch) .. " --host -- /usr/bin/uname -a"))
+        say("host python3: " .. probe_capture(shell_quote(launch) .. " --host -- /usr/bin/env python3 --version"))
+        say("host python3 ctypes: " .. probe_capture(shell_quote(launch) .. " --host -- /usr/bin/env python3 -c 'import ctypes; print(ctypes.sizeof(ctypes.c_void_p))'"))
+        if dir then
+            local marker = dir .. "/probe_marker"
+            local f = io.open(marker, "wb")
+            if f then f:write("x") f:close() end
+            say("host sees the work folder: " .. probe_capture(shell_quote(launch) .. " --host -- /usr/bin/test -f " .. shell_quote(marker) .. " && echo yes || echo no"))
+            pcall(os.remove, marker)
+        end
+        say("alongside steam: " .. probe_capture(shell_quote(launch) .. " --alongside-steam -- /usr/bin/env python3 --version"))
+    end
+    local text = table.concat(lines, "\n")
+    return '{"ok":true,"text":' .. json_string(text) .. '}'
 end
 
 logger:info("Achievement Manager: RPC functions registered (" .. PLATFORM .. ")")

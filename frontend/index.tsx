@@ -1,5 +1,5 @@
 // @ts-nocheck
-/* Achievement Manager 1.15.0. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
+/* Achievement Manager 1.15.1. Adds a button next to "View My Achievements" that opens a Steam-styled window for unlocking and locking achievements. */
 import { definePlugin, Field } from 'millennium';
 
 const React = (window as any).SP_REACT;
@@ -336,6 +336,7 @@ async function callBackend(method, payload) {
   if (method === 'am_apply') raw = await backend.am_apply(arg);
   else if (method === 'am_stats') raw = await backend.am_stats(arg);
   else if (method === 'am_stats_apply') raw = await backend.am_stats_apply(arg);
+  else if (method === 'am_linux_probe') raw = await backend.am_linux_probe(arg);
   else raw = await backend.am_status(arg);
   if (raw && typeof raw === 'object') return raw;
   try { return JSON.parse(String(raw)); } catch (e) { return { ok: false, error: 'bad_response' }; }
@@ -351,7 +352,7 @@ const ERRORS = {
   csc_not_found: 'The .NET Framework 4 compiler (csc.exe) was not found; the helper could not be built.',
   compilation_failed: 'The helper program could not be built.',
   helper_source_missing: 'The plugin is missing its helper file in resources/ (steam_achievement_helper.cs on Windows, steam_achievement_helper.py on Linux).',
-  python_not_found: 'Python 3 was not found. On Linux the helper needs python3 (3.6 or newer); install it with your distribution\'s package manager.',
+  python_not_found: 'Python 3 was not found. On Linux the helper needs python3 (3.6 or newer); install it with your distribution\'s package manager. The new container Steam has none of its own, so the plugin also tries the system Python through Steam\'s launcher; if that was not found either, run __achievementManager.linuxProbe() in the console.',
   python_too_old: 'The installed Python is too old; the helper needs Python 3.6 or newer.',
   helper_failed: 'The helper stopped without giving an answer.',
   helper_write_failed: 'The helper could not be written to disk.',
@@ -375,7 +376,7 @@ const explain = res => {
 
 
 // Steam's logo, as a 24x24 SVG path (drawn in the loading screen)
-const PLUGIN_VERSION = '1.15.0';   // keep in step with millennium.toml; shown in diagnose() reports
+const PLUGIN_VERSION = '1.15.1';   // keep in step with millennium.toml; shown in diagnose() reports
 
 const STEAM_LOGO = 'M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z';
 
@@ -1655,6 +1656,15 @@ async function diagnose(appId, names) {
 }
 
 // for bug reports: what Steam's language is and which buttons the page has (__achievementManager.buttons())
+// Linux only: how this Steam runs (container or not), where python3 is, and whether Steam's launcher can reach the host.
+//   copy((await __achievementManager.linuxProbe()).join('\n'))
+async function linuxProbe() {
+  let res;
+  try { res = await callBackend('am_linux_probe', {}); }
+  catch (e) { return ['backend unreachable: ' + String((e && e.message) || e)]; }
+  return ['Achievement Manager ' + PLUGIN_VERSION + ' Linux probe'].concat(String((res && res.text) || JSON.stringify(res)).split('\n'));
+}
+
 function describeButtons() {
   const lib = libraryWindow();
   const doc = lib && lib.win.document;
@@ -1761,7 +1771,7 @@ function pin(btn, anchor) {
     const mode = btn.getAttribute('data-amw-mode');
     if (mode === 'inside' || !anchor.parentNode) return;
     if (!btn.__amwWidth) {                                   // its own width, measured once, loose in the page
-      setStyle(btn, { position: 'absolute', margin: '0', width: '', left: '0px', zIndex: '0' });
+      setStyle(btn, { position: 'absolute', margin: '0', width: 'max-content', zIndex: '0' });   // no temporary left: nothing to slide from
       btn.__amwWidth = btn.offsetWidth || 0;
     }
     const width = btn.__amwWidth;
@@ -1774,13 +1784,23 @@ function pin(btn, anchor) {
       if (anchor.nextElementSibling !== btn) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
       setStyle(btn, { position: 'static', display: 'block', margin: '6px 0 0', left: '', top: '', height: '', zIndex: '0',
         width: anchor.offsetWidth ? anchor.offsetWidth + 'px' : '' });
+      reveal(btn);
       return;
     }
     if (mode !== 'left') btn.setAttribute('data-amw-mode', 'left');
     if (btn.nextElementSibling !== anchor) anchor.parentNode.insertBefore(btn, anchor);
     setStyle(btn, { position: 'absolute', display: '', margin: '0', right: 'auto', bottom: 'auto', width: '', zIndex: '0',
       left: room + 'px', top: anchor.offsetTop + 'px', height: anchor.offsetHeight ? anchor.offsetHeight + 'px' : '' });
+    reveal(btn);
   } catch (e) { /* layout not available */ }
+}
+
+// the copy starts hidden and is shown once it has its final place; a theme's `transition: all` can then never make it slide
+const VISUAL_TRANSITIONS = 'color, background-color, border-color, box-shadow, opacity, filter';
+function reveal(btn) { if (btn.style.visibility) btn.style.removeProperty('visibility'); }
+function lockPosition(btn) {
+  btn.style.setProperty('visibility', 'hidden');
+  btn.style.setProperty('transition-property', VISUAL_TRANSITIONS, 'important');
 }
 
 // the copy that sits beside this original (before it, or after it when there was no room)
@@ -1852,6 +1872,7 @@ function ensureButton(doc) {
     btn.setAttribute(BTN_ATTR, '1');
     btn.setAttribute('data-amw-mode', 'left');
     btn.textContent = TITLE;
+    lockPosition(btn);
     btn.addEventListener('click', onButtonClick(btn, doc, anchor));
     anchor.parentNode.insertBefore(btn, anchor);
     pin(btn, anchor);
@@ -1892,7 +1913,15 @@ function attach(doc, win) {
   detach();
   observedDoc = doc;
   const Observer = win.MutationObserver || window.MutationObserver;
-  observer = new Observer(() => { clearTimeout(debounce); debounce = setTimeout(() => { try { ensureButton(doc); } catch (e) { /* ignore */ } }, 150); });
+  // react to a page change within one frame (the old 150 ms wait made the button appear after Steam's own), at most every 40 ms
+  let lastRun = 0;
+  const run = () => { debounce = 0; if (observedDoc !== doc) return; lastRun = Date.now(); try { ensureButton(doc); } catch (e) { /* ignore */ } };
+  observer = new Observer(() => {
+    if (debounce) return;
+    const wait = Math.max(0, 40 - (Date.now() - lastRun));
+    const raf = win.requestAnimationFrame ? win.requestAnimationFrame.bind(win) : null;
+    debounce = (wait === 0 && raf) ? raf(run) : setTimeout(run, wait);
+  });
   observer.observe(doc.body, { childList: true, subtree: true });
 }
 
@@ -2463,6 +2492,7 @@ async function main() {
     buttons: describeButtons,
     // a report for "why is this achievement not unlocking": copy((await __achievementManager.diagnose(appId, 'ACH_NAME')).join('\n'))
     diagnose,
+    linuxProbe,
     // what the window found in its own page (for bug reports): are Steam's Properties-window classes styled, and the theme accent
     look: () => { const el = document.querySelector('.amw-root'); return el ? { classes: el.className, fallback: el.classList.contains('amw-fallback') } : null; },
   };
